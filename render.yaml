@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: paypulse-ai-escrow-os
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PAYPAL_ENVIRONMENT
+        value: sandbox
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: NEXT_PUBLIC_PAYPAL_CLIENT_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

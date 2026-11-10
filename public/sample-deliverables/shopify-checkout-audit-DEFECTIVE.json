@@ -1,0 +1,33 @@
+{
+  "schema_version": "2.1.0",
+  "deliverable_type": "FREELANCE_MILESTONE_DELIVERY_MANIFEST",
+  "contract_reference": "MILES-2026-104",
+  "repository_commit": "f013d99b44a21c8e770192b34c11a098e7712c04",
+  "build_metrics": {
+    "unit_tests_passed": 39,
+    "unit_tests_total": 48,
+    "integration_tests_passed": 9,
+    "integration_tests_total": 14,
+    "bundle_size_kb": 612,
+    "max_allowed_bundle_size_kb": 250,
+    "lighthouse_performance_score": 54,
+    "min_required_lighthouse_score": 90
+  },
+  "security_scan_sarif_summary": {
+    "scanner": "Semgrep + npm-audit",
+    "critical_vulnerabilities": 1,
+    "high_vulnerabilities": 2,
+    "medium_vulnerabilities": 4,
+    "secrets_leaked": true,
+    "findings": [
+      "CRITICAL: PAYPAL-TRANSMISSION-SIG webhook verification bypassed with hardcoded return true in verifyPayPalSignature.ts",
+      "HIGH: Uncompressed 420KB third-party analytics bundle imported synchronously in checkout header",
+      "HIGH: Missing idempotency header PayPal-Request-Id on order capture retries"
+    ]
+  },
+  "failing_test_suites": [
+    "tests/webhooks/verifyPayPalSignature.spec.ts (5 failed)",
+    "tests/checkout/idempotencyRetry.spec.ts (4 failed)"
+  ],
+  "freelancer_notes": "Initial checkout UI layout is finished. Still debugging 9 failing webhook and retry tests, and haven't tree-shaken the bundle yet."
+}

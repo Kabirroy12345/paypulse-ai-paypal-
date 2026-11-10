@@ -1,0 +1,34 @@
+{
+  "name": "paypulse-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PayPulse AI — Autonomous Agentic Procurement, Multimodal Milestone Escrow & PayPal Treasury OS powered by Gemini 3.8 Flash, PayPal REST APIs, and AG Grid.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@google/genai": "^2.29.1",
+    "@paypal/agent-toolkit": "^1.11.0",
+    "@paypal/react-paypal-js": "^8.7.0",
+    "ag-grid-community": "^33.1.1",
+    "ag-grid-react": "^33.1.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "next": "15.1.7",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.2",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3"
+  }
+}

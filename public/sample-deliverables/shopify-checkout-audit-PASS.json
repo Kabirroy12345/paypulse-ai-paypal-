@@ -1,0 +1,38 @@
+{
+  "schema_version": "2.1.0",
+  "deliverable_type": "FREELANCE_MILESTONE_DELIVERY_MANIFEST",
+  "contract_reference": "MILES-2026-101",
+  "repository_commit": "a94f82e10c7b4d3198e2a11c6f05b329d8714e02",
+  "build_metrics": {
+    "unit_tests_passed": 48,
+    "unit_tests_total": 48,
+    "integration_tests_passed": 14,
+    "integration_tests_total": 14,
+    "bundle_size_kb": 184,
+    "max_allowed_bundle_size_kb": 250,
+    "lighthouse_performance_score": 96,
+    "min_required_lighthouse_score": 90
+  },
+  "security_scan_sarif_summary": {
+    "scanner": "Semgrep + npm-audit",
+    "critical_vulnerabilities": 0,
+    "high_vulnerabilities": 0,
+    "medium_vulnerabilities": 0,
+    "secrets_leaked": false
+  },
+  "deliverable_artifacts": [
+    {
+      "path": "src/checkout/PayPalAuthorizationFlow.tsx",
+      "lines_of_code": 312,
+      "test_coverage_pct": 94.6,
+      "description": "Implemented PayPal Orders v2 intent:AUTHORIZE checkout flow with webhook signature verification and idempotency keys."
+    },
+    {
+      "path": "src/webhooks/verifyPayPalSignature.ts",
+      "lines_of_code": 128,
+      "test_coverage_pct": 100.0,
+      "description": "Cryptographic verification of PAYPAL-TRANSMISSION-SIG headers against PayPal Sandbox & Live webhook certificates."
+    }
+  ],
+  "freelancer_notes": "All 48 unit tests and 14 end-to-end Sandbox tests pass. Production bundle is 184 KB (well under the 250 KB cap), zero vulnerabilities detected, and Lighthouse performance is 96/100."
+}
