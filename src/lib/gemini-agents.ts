@@ -40,20 +40,64 @@ export interface NegotiatedDealOutput {
   usedLiveGemini: boolean;
 }
 
+function normalizeSplitRecipients(
+  rawRecipients: Array<{
+    role: string;
+    name: string;
+    email: string;
+    sharePct: number;
+  }>,
+  totalAmountUsd: number
+): SplitRecipient[] {
+  const totalShare =
+    rawRecipients.reduce((acc, r) => acc + (Number(r.sharePct) || 0), 0) || 100;
+  const normalizedShares = rawRecipients.map((r, idx) => {
+    if (idx === rawRecipients.length - 1) {
+      const prevSum = rawRecipients
+        .slice(0, -1)
+        .reduce(
+          (acc, item) =>
+            acc + Math.round(((Number(item.sharePct) || 0) / totalShare) * 100),
+          0
+        );
+      return Math.max(1, 100 - prevSum);
+    }
+    return Math.max(1, Math.round(((Number(r.sharePct) || 0) / totalShare) * 100));
+  });
+
+  let allocatedUsd = 0;
+  return rawRecipients.map((r, idx) => {
+    const sharePct = normalizedShares[idx];
+    const isLast = idx === rawRecipients.length - 1;
+    const amountUsd = isLast
+      ? Number((totalAmountUsd - allocatedUsd).toFixed(2))
+      : Number(((totalAmountUsd * sharePct) / 100).toFixed(2));
+    allocatedUsd = Number((allocatedUsd + amountUsd).toFixed(2));
+    return {
+      role: r.role,
+      name: r.name,
+      email: r.email,
+      sharePct,
+      amountUsd,
+      status: "PENDING" as const,
+    };
+  });
+}
+
 export async function runAutonomousNegotiationAgent(
   input: NegotiateDealInput
 ): Promise<NegotiatedDealOutput> {
   const apiKey = resolveGeminiKey(input.runtime);
   const nowStr = new Date().toTimeString().slice(0, 8);
 
-  const quote = Math.max(100, Number(input.initialQuoteUsd) || 3200);
+  const quote = Math.max(50, Number(input.initialQuoteUsd) || 3200);
   // Ensure vendor floor is realistic (cannot exceed initial quote)
   const floor = Math.min(
     quote,
-    Math.max(Math.round(quote * 0.65), Number(input.vendorPriceFloorUsd) || Math.round(quote * 0.86))
+    Math.max(50, Number(input.vendorPriceFloorUsd) || Math.round(quote * 0.86))
   );
   const buyerTarget = Math.max(
-    100,
+    50,
     Number(input.buyerTargetBudgetUsd) || Math.round(quote * 0.82)
   );
 
@@ -65,7 +109,7 @@ export async function runAutonomousNegotiationAgent(
     try {
       const client = new GoogleGenAI({ apiKey });
       const prompt = `Simulate a realistic 4-turn negotiation between two autonomous agents for a small business hiring a freelance studio/agency:
-1. BUYER_AGENT (representing "${input.clientBusinessName || " Harbor & Oak Roasters"}"):
+1. BUYER_AGENT (representing "${input.clientBusinessName || "Harbor & Oak Roasters"}"):
    - Wants to hire "${input.vendorName}" for: "${input.projectTitle}" (${input.category})
    - Buyer's target budget: $${buyerTarget} USD
    - Context: ${input.buyerBrief || "Wants guaranteed test coverage, bundle size cap <=250KB, and zero security vulnerabilities, backed by an immediate PayPal Orders v2 (intent: AUTHORIZE) hold."}
@@ -161,14 +205,10 @@ Return JSON matching the schema.`;
                 },
               ];
 
-        const splitRecipients: SplitRecipient[] = rawRecipients.map((r) => ({
-          role: r.role,
-          name: r.name,
-          email: r.email,
-          sharePct: r.sharePct,
-          amountUsd: Number(((clampedAgreed * r.sharePct) / 100).toFixed(2)),
-          status: "PENDING",
-        }));
+        const splitRecipients = normalizeSplitRecipients(
+          rawRecipients,
+          clampedAgreed
+        );
 
         const logEntries: NegotiationLogEntry[] = (
           parsed.negotiationTurns || []
@@ -196,7 +236,7 @@ Return JSON matching the schema.`;
           savingsPct,
           milestoneTitle:
             parsed.milestoneTitle ||
-            "Milestone 1: Production Delivery Manifest, 100% Unit Tests & SARIF Scan",
+            `Milestone 1: ${input.projectTitle.slice(0, 52)} — Verified Delivery`,
           deliverableSummary:
             parsed.deliverableSummary ||
             "Requires valid v2.1.0 delivery manifest, 100% unit test pass rate, bundle <= 250KB, and 0 critical/high CVEs.",
@@ -210,18 +250,29 @@ Return JSON matching the schema.`;
     }
   }
 
-  // Dynamic floor-aware bargaining calculation (never a fixed percentage!)
+  // Deterministic context-derived bargaining weight so different contracts have organic, non-scripted clearing prices
+  const seedText = `${input.projectTitle}:${input.vendorName}:${quote}:${floor}:${buyerTarget}`;
+  let hashAcc = 0;
+  for (let i = 0; i < seedText.length; i++) {
+    hashAcc = (hashAcc * 31 + seedText.charCodeAt(i)) % 1000;
+  }
+  const bargainingFactor = 0.16 + (hashAcc % 19) / 100; // Ranges dynamically between 0.16 and 0.34
+
   let clearingPrice: number;
   if (buyerTarget <= floor) {
-    // Buyer wants less than vendor's hard floor; vendor holds near its floor + 22% of spread
-    clearingPrice = Math.round(floor + (quote - floor) * 0.22);
+    // Buyer wants less than vendor's hard floor; vendor defends floor + dynamic spread share
+    clearingPrice = Math.round(floor + (quote - floor) * bargainingFactor);
   } else if (buyerTarget >= quote) {
     clearingPrice = quote;
   } else {
-    // Nash bargaining solution between buyerTarget and quote, bounded by vendor floor
-    clearingPrice = Math.max(
-      floor,
-      Math.round(buyerTarget * 0.62 + floor * 0.38)
+    // Asymmetric Nash bargaining solution between buyerTarget and floor/quote
+    const buyerWeight = 0.55 + (hashAcc % 15) / 100;
+    clearingPrice = Math.min(
+      quote,
+      Math.max(
+        floor,
+        Math.round(buyerTarget * buyerWeight + floor * (1 - buyerWeight))
+      )
     );
   }
 
@@ -232,30 +283,31 @@ Return JSON matching the schema.`;
     Math.min(buyerTarget, Math.round(quote * 0.81))
   );
 
-  return {
-    aiNegotiatedUsd: clearingPrice,
-    savingsUsd,
-    savingsPct,
-    milestoneTitle: `Milestone 1: ${input.projectTitle.slice(0, 52)} — Verified Delivery`,
-    deliverableSummary: `Deterministic verification of unit tests, bundle size cap (<= 250 KB), and zero-CVE SARIF scan + Gemini 3.8 Flash review.`,
-    splitRecipients: [
+  const splitRecipients = normalizeSplitRecipients(
+    [
       {
         role: "Lead Agency / Freelancer (80%)",
         name: input.vendorName,
         email: input.vendorEmail,
         sharePct: 80,
-        amountUsd: Number((clearingPrice * 0.8).toFixed(2)),
-        status: "PENDING",
       },
       {
         role: "Subcontracted QA & Security Reviewer (20%)",
         name: "Maya Lin (Independent QA)",
         email: "maya.qa.sandbox@freelanceguild.dev",
         sharePct: 20,
-        amountUsd: Number((clearingPrice * 0.2).toFixed(2)),
-        status: "PENDING",
       },
     ],
+    clearingPrice
+  );
+
+  return {
+    aiNegotiatedUsd: clearingPrice,
+    savingsUsd,
+    savingsPct,
+    milestoneTitle: `Milestone 1: ${input.projectTitle.slice(0, 52)} — Verified Delivery`,
+    deliverableSummary: `Deterministic verification of unit tests, bundle size cap (<= 250 KB), and zero-CVE SARIF scan + Gemini 3.8 Flash review.`,
+    splitRecipients,
     agentNegotiationLog: [
       {
         id: `neg-${Date.now()}-1`,

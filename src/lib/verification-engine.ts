@@ -52,14 +52,25 @@ export function runDeterministicFileChecks(
     checks.push({
       rule: "Deliverable Manifest JSON Schema (v2.1.0)",
       expected: "Valid build_metrics & security_scan_sarif_summary objects",
-      actual: schemaValid ? "Valid v2.1.0 Schema" : "Missing required manifest keys",
+      actual: schemaValid
+        ? "Valid v2.1.0 Schema"
+        : "Missing required manifest keys",
       passed: schemaValid,
     });
 
     if (parsed.build_metrics) {
       unitTestsPassed = Number(parsed.build_metrics.unit_tests_passed ?? 0);
       unitTestsTotal = Number(parsed.build_metrics.unit_tests_total ?? 1);
-      bundleSizeKb = Number(parsed.build_metrics.bundle_size_kb ?? bundleSizeKb);
+      const integPassed = Number(
+        parsed.build_metrics.integration_tests_passed ?? 0
+      );
+      const integTotal = Number(
+        parsed.build_metrics.integration_tests_total ?? 0
+      );
+
+      bundleSizeKb = Number(
+        parsed.build_metrics.bundle_size_kb ?? bundleSizeKb
+      );
       maxAllowedBundleKb = Number(
         parsed.build_metrics.max_allowed_bundle_size_kb ?? 250
       );
@@ -76,6 +87,15 @@ export function runDeterministicFileChecks(
         actual: `${unitTestsPassed}/${unitTestsTotal} passing`,
         passed: unitTestsTotal > 0 && unitTestsPassed === unitTestsTotal,
       });
+
+      if (integTotal > 0) {
+        checks.push({
+          rule: "End-to-End Integration Test Suite",
+          expected: `${integTotal}/${integTotal} passing`,
+          actual: `${integPassed}/${integTotal} passing`,
+          passed: integPassed === integTotal,
+        });
+      }
 
       checks.push({
         rule: "Production Bundle Size Cap",
@@ -178,7 +198,12 @@ Milestone Requirement: "${deal.milestoneTitle}"
 
 Submitted File Name: ${fileName} (SHA-256: ${deterministicReport.sha256Digest})
 Deterministic Pre-Check Result: ${
-        deterministicReport.allDeterministicPassed ? "ALL PASSED" : "FAILED DETERMINISTIC GATES"
+        deterministicReport.allDeterministicPassed
+          ? "ALL PASSED"
+          : `FAILED (${deterministicReport.checks
+              .filter((c) => !c.passed)
+              .map((c) => `${c.rule}: ${c.actual}`)
+              .join(", ")})`
       }
 
 Actual File Contents:
@@ -188,7 +213,7 @@ ${rawContent.slice(0, 5000)}
 
 Evaluate the file contents strictly against the milestone requirements. Do NOT invent a percentage confidence score. Instead, return a structured JSON object with:
 - passed (boolean: true ONLY if the deliverable genuinely satisfies the technical requirements and has no failing tests, bypassed security checks, or oversized bundles)
-- summary (1-2 sentence concrete technical assessment citing specific values from the file)
+- summary (1-2 sentence plain-English technical assessment citing specific values from the file)
 - findings (array of 3 objects with requirement, status: "PASS" | "FAIL", and evidence citing exact metrics/lines from the file).`;
 
       const contentParts: Array<Record<string, unknown>> = [
@@ -240,7 +265,8 @@ Evaluate the file contents strictly against the milestone requirements. Do NOT i
         const parsed = JSON.parse(interaction.output_text);
         return {
           passed:
-            Boolean(parsed.passed) && deterministicReport.allDeterministicPassed,
+            Boolean(parsed.passed) &&
+            deterministicReport.allDeterministicPassed,
           summary: parsed.summary,
           findings: parsed.findings || [],
           modelUsed: "gemini-3.8-flash (Live API)",
@@ -251,15 +277,15 @@ Evaluate the file contents strictly against the milestone requirements. Do NOT i
     }
   }
 
-  // Fallback derived directly from the parsed file metrics
+  // Dynamic synthesis derived directly from the parsed file metrics
   if (!deterministicReport.allDeterministicPassed) {
     const failedChecks = deterministicReport.checks.filter((c) => !c.passed);
     return {
       passed: false,
-      summary: `Semantic & static inspection of ${fileName} detected ${failedChecks.length} blocking failure(s): ${failedChecks
-        .map((c) => `${c.rule} (${c.actual})`)
+      summary: `Semantic & static inspection of "${fileName}" found ${failedChecks.length} blocking issue(s): ${failedChecks
+        .map((c) => `${c.rule} (${c.actual} vs expected ${c.expected})`)
         .join("; ")}. PayPal authorization capture is blocked.`,
-      findings: deterministicReport.checks.slice(0, 4).map((c) => ({
+      findings: deterministicReport.checks.map((c) => ({
         requirement: c.rule,
         status: c.passed ? "PASS" : "FAIL",
         evidence: `Expected ${c.expected} — Found ${c.actual}`,
@@ -270,15 +296,15 @@ Evaluate the file contents strictly against the milestone requirements. Do NOT i
 
   return {
     passed: true,
-    summary: `Inspected ${fileName} (SHA-256: ${deterministicReport.sha256Digest.slice(
+    summary: `Inspected "${fileName}" (SHA-256: ${deterministicReport.sha256Digest.slice(
       0,
       12
     )}…). All ${deterministicReport.unitTestsPassed}/${
       deterministicReport.unitTestsTotal
-    } tests pass, bundle size (${deterministicReport.bundleSizeKb} KB) is within the ${
+    } unit tests pass, bundle size (${deterministicReport.bundleSizeKb} KB) is under the ${
       deterministicReport.maxAllowedBundleKb
     } KB cap, and 0 security vulnerabilities were found.`,
-    findings: deterministicReport.checks.slice(0, 4).map((c) => ({
+    findings: deterministicReport.checks.map((c) => ({
       requirement: c.rule,
       status: "PASS",
       evidence: `Verified: ${c.actual} (Target: ${c.expected})`,
@@ -307,7 +333,9 @@ export function buildVerificationAuditTrail(params: {
             params.deterministicReport.checks.filter((c) => !c.passed).length
           } deterministic check(s) failed on ${params.deterministicReport.fileName}.`,
       cryptographicHash: `sha256:${params.deterministicReport.sha256Digest}`,
-      status: params.deterministicReport.allDeterministicPassed ? "PASS" : "BLOCK",
+      status: params.deterministicReport.allDeterministicPassed
+        ? "PASS"
+        : "BLOCK",
     },
     {
       id: `audit-gem-${Date.now() + 1}`,

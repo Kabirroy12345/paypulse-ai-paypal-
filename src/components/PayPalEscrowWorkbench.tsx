@@ -137,10 +137,21 @@ export default function PayPalEscrowWorkbench({
     paypalClientId !== "your_paypal_sandbox_client_id" &&
     paypalClientId!.length > 12;
 
+  const formatUsd = (amount: number) =>
+    amount.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+
   const det = deal.deterministicAudit;
   const isBlocked = deal.status === "HOLD_BLOCKED_FAILED_CHECKS";
   const isAwaitingBuyer = deal.status === "AWAITING_BUYER_SIGN_OFF";
   const isPaid = deal.status === "CAPTURED_AND_SPLIT_PAID";
+  const hasUnverifiedEdits =
+    fileName !== deal.submittedFileName ||
+    fileContent !== deal.submittedFileRawContent;
+
+  const failedChecks = det.checks.filter((c) => !c.passed);
 
   // Compute 6-step contract stepper state:
   // 1. Negotiated -> 2. Hold placed -> 3. Delivered -> 4. Checks passed -> 5. Buyer approved -> 6. Paid
@@ -157,9 +168,7 @@ export default function PayPalEscrowWorkbench({
     },
     {
       label: "3. Delivered",
-      sub: deal.submittedFileName.includes("DEFECTIVE")
-        ? "Defective File"
-        : "Manifest Uploaded",
+      sub: `${det.fileSizeBytes} B • sha256:${det.sha256Digest.slice(0, 6)}…`,
       state:
         deal.status === "AUTHORIZED_HOLD"
           ? ("ACTIVE" as const)
@@ -168,7 +177,7 @@ export default function PayPalEscrowWorkbench({
     {
       label: isBlocked ? "4. Checks failed" : "4. Checks passed",
       sub: isBlocked
-        ? `${det.checks.filter((c) => !c.passed).length} Rules Failed`
+        ? `${failedChecks.length} Rule(s) Failed`
         : `${det.checks.filter((c) => c.passed).length}/${det.checks.length} Passed`,
       state: isBlocked
         ? ("FAILED" as const)
@@ -182,7 +191,7 @@ export default function PayPalEscrowWorkbench({
         ? "Signed Off"
         : isAwaitingBuyer
         ? "Action Needed"
-        : `>${deal.autoCaptureThresholdUsd} Gate`,
+        : `>$${deal.autoCaptureThresholdUsd} Gate`,
       state: isPaid
         ? ("DONE" as const)
         : isAwaitingBuyer
@@ -196,11 +205,13 @@ export default function PayPalEscrowWorkbench({
     },
   ];
 
-  // Plain-English Gate Reasons for Stages 1, 2, 3
+  // Dynamic Plain-English Gate Reasons for Stages 1, 2, 3 derived directly from rule checks
   const stage1Passed = det.allDeterministicPassed;
   const stage1Reason = stage1Passed
-    ? `Passed: ${det.unitTestsPassed}/${det.unitTestsTotal} unit tests pass, bundle is ${det.bundleSizeKb} KB (limit ${det.maxAllowedBundleKb} KB), 0 security vulnerabilities found, and SHA-256 (${det.sha256Digest.slice(0, 10)}…) verified.`
-    : `Failed: Only ${det.unitTestsPassed}/${det.unitTestsTotal} unit tests passed, bundle size is ${det.bundleSizeKb} KB (exceeds ${det.maxAllowedBundleKb} KB limit), and ${det.criticalVulnerabilities} critical vulnerability was found in ${det.fileName}.`;
+    ? `Passed all ${det.checks.length}/${det.checks.length} deterministic rules on ${det.fileName}: ${det.unitTestsPassed}/${det.unitTestsTotal} unit tests pass, bundle is ${det.bundleSizeKb} KB (limit ${det.maxAllowedBundleKb} KB), 0 critical/high CVEs, and SHA-256 (${det.sha256Digest.slice(0, 10)}…) verified.`
+    : `Failed ${failedChecks.length} of ${det.checks.length} deterministic rule(s) on ${det.fileName}: ${failedChecks
+        .map((c) => `${c.rule} [actual: ${c.actual}, required: ${c.expected}]`)
+        .join("; ")}.`;
 
   const stage2Passed = deal.geminiReview.passed && stage1Passed;
   const stage2Reason = deal.geminiReview.summary;
@@ -209,10 +220,10 @@ export default function PayPalEscrowWorkbench({
   const stage3Reason = isPaid
     ? `Approved by ${deal.humanApprovedBy || deal.clientBusinessName}. Captured Order ${deal.paypalOrderId} and disbursed split payout batch ${deal.paypalPayoutBatchId}.`
     : isBlocked
-    ? `Blocked: Buyer cannot capture payment while Stage 1 or Stage 2 checks are failing.`
+    ? `Blocked: Buyer cannot capture payment while Stage 1 (${failedChecks.length} failed rule${failedChecks.length === 1 ? "" : "s"}) or Stage 2 checks are failing.`
     : isAwaitingBuyer
     ? `Ready for Buyer Sign-Off: Because $${deal.aiNegotiatedUsd.toLocaleString()} exceeds the $${deal.autoCaptureThresholdUsd} auto-capture limit, the buyer must click "Approve & Capture" below.`
-    : `Waiting for freelancer deliverable inspection to complete.`;
+    : `Waiting for freelancer deliverable inspection to complete. Click "Run Verification Gate" below to verify ${fileName}.`;
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-[#0B1120] shadow-2xl overflow-hidden flex flex-col">
@@ -588,6 +599,17 @@ export default function PayPalEscrowWorkbench({
                   className="w-full rounded-xl bg-slate-950 border border-slate-800 p-3 font-mono text-xs text-emerald-300 focus:outline-none focus:border-[#009CDE]"
                 />
 
+                {hasUnverifiedEdits && (
+                  <div className="px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-200 text-[11px] font-semibold flex items-center justify-between">
+                    <span>
+                      Deliverable content modified — click below to recompute SHA-256 &amp; gate checks.
+                    </span>
+                    <span className="font-mono text-[10px] uppercase px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-300">
+                      Unverified Edits
+                    </span>
+                  </div>
+                )}
+
                 <button
                   onClick={() =>
                     onRunFileVerification(
@@ -604,7 +626,7 @@ export default function PayPalEscrowWorkbench({
                   {isProcessing ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Inspecting File with Deterministic Gate & Gemini 3.8...
+                      Inspecting File with Deterministic Gate &amp; Gemini 3.8...
                     </>
                   ) : (
                     <>
@@ -622,7 +644,7 @@ export default function PayPalEscrowWorkbench({
                     <div>
                       <span className="text-xs font-extrabold uppercase tracking-wider text-[#FFC439] flex items-center gap-1.5">
                         <UserCheck className="w-4 h-4" />
-                        Buyer Capture & Split Payout Approval
+                        Buyer Capture &amp; Split Payout Approval
                       </span>
                       <p className="text-xs text-slate-400 mt-0.5">
                         Review the authorized hold amount, verified deliverable, and recipient split before releasing funds:
@@ -631,7 +653,7 @@ export default function PayPalEscrowWorkbench({
                     <div className="text-right">
                       <div className="text-xs text-slate-400">Hold to Capture</div>
                       <div className="text-xl font-mono font-extrabold text-white">
-                        ${deal.aiNegotiatedUsd.toLocaleString()}.00
+                        ${formatUsd(deal.aiNegotiatedUsd)}
                       </div>
                     </div>
                   </div>
@@ -651,7 +673,7 @@ export default function PayPalEscrowWorkbench({
                         Verified Deliverable File:
                       </span>
                       <code className="font-mono font-bold text-emerald-300 truncate block">
-                        {det.fileName}
+                        {det.fileName} (sha256:{det.sha256Digest.slice(0, 6)}…)
                       </code>
                     </div>
                   </div>
@@ -680,7 +702,7 @@ export default function PayPalEscrowWorkbench({
                         </div>
                         <div className="text-right">
                           <div className="font-mono font-extrabold text-emerald-400 text-sm">
-                            ${rec.amountUsd.toLocaleString()}.00
+                            ${formatUsd(rec.amountUsd)}
                           </div>
                           <span
                             className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded ${
@@ -704,12 +726,29 @@ export default function PayPalEscrowWorkbench({
                   {isPaid ? (
                     <div className="w-full py-3 px-4 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-extrabold text-sm flex items-center justify-center gap-2">
                       <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                      Captured (${deal.aiNegotiatedUsd.toLocaleString()}) & Split Paid (Batch {deal.paypalPayoutBatchId})
+                      Captured (${formatUsd(deal.aiNegotiatedUsd)}) &amp; Split Paid (Batch {deal.paypalPayoutBatchId})
                     </div>
+                  ) : hasUnverifiedEdits ? (
+                    <button
+                      onClick={() =>
+                        onRunFileVerification(
+                          deal,
+                          fileName,
+                          fileContent,
+                          uploadedBase64,
+                          uploadedMime
+                        )
+                      }
+                      disabled={isProcessing}
+                      className="w-full py-3.5 px-5 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#0070BA] to-[#009CDE] hover:brightness-110 text-white shadow-xl flex items-center justify-center gap-2 transition disabled:opacity-50"
+                    >
+                      <ShieldCheck className="w-4 h-4 text-[#FFC439]" />
+                      Verify Modified File (&ldquo;{fileName}&rdquo;) Before Capture
+                    </button>
                   ) : isBlocked ? (
                     <div className="w-full py-3 px-4 rounded-xl bg-rose-500/20 border border-rose-500/50 text-rose-200 font-bold text-xs flex items-center justify-center gap-2">
                       <XCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                      Approval Disabled — Deliverable Failed Stage 1 Deterministic Checks
+                      Approval Disabled — Deliverable Failed {failedChecks.length} Deterministic Rule(s)
                     </div>
                   ) : (
                     <button
@@ -725,12 +764,12 @@ export default function PayPalEscrowWorkbench({
                       {isProcessing ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin text-[#003087]" />
-                          Capturing PayPal Hold & Sending Split Payouts...
+                          Capturing PayPal Hold &amp; Sending Split Payouts...
                         </>
                       ) : (
                         <>
                           <UserCheck className="w-5 h-5 text-[#003087]" />
-                          Approve & Capture ${deal.aiNegotiatedUsd.toLocaleString()}.00 PayPal Hold
+                          Approve &amp; Capture ${formatUsd(deal.aiNegotiatedUsd)} PayPal Hold
                           <ArrowRight className="w-4 h-4 text-[#003087]" />
                         </>
                       )}
