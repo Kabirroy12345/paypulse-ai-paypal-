@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { AgentTelemetryEvent, EscrowDeal } from "@/types/paypulse";
 import {
   Sparkles,
@@ -8,6 +8,8 @@ import {
   Activity,
   Zap,
   Terminal,
+  Loader2,
+  CheckCircle2,
 } from "lucide-react";
 
 interface AgentCommandPanelProps {
@@ -55,20 +57,6 @@ const PRESET_SCENARIOS: Array<{
       "Lock funds upfront via PayPal intent:AUTHORIZE; require 48/48 passing unit tests, bundle <=250KB, and human buyer sign-off above $500.",
   },
   {
-    label: "⚡ Micro-Milestone Bugfix ($480 Quote <= $500 Auto-Capture)",
-    clientBusinessName: "nomadPod Podcast Studio",
-    vendorName: "Alex Rivera (Independent Freelancer)",
-    vendorEmail: "alex.rivera.sandbox@indiedev.io",
-    category: "Full-Stack Web App",
-    projectTitle: "PayPal Webhook Signature Verification Hotfix & Unit Tests",
-    initialQuoteUsd: 480,
-    vendorPriceFloorUsd: 410,
-    buyerTargetBudgetUsd: 420,
-    autoCaptureThresholdUsd: 500,
-    buyerBrief:
-      "Micro-milestone under $500 policy threshold: auto-capture PayPal authorization as soon as deterministic SHA-256 and unit test checks pass.",
-  },
-  {
     label: "🛡️ Tight-Floor Security Audit ($2,100 Quote vs $1,960 Floor)",
     clientBusinessName: "CivicHealth Telemedicine Clinic",
     vendorName: "Bastion AppSec Collective",
@@ -82,6 +70,20 @@ const PRESET_SCENARIOS: Array<{
     buyerBrief:
       "Buyer wants $1,800, but vendor's hard labor floor is $1,960 — watch the Vendor Agent defend its floor and settle near $1,990.",
   },
+  {
+    label: "⚡ Micro-Milestone Bugfix ($480 Quote <= $500 Auto-Capture)",
+    clientBusinessName: "nomadPod Podcast Studio",
+    vendorName: "Alex Rivera (Independent Freelancer)",
+    vendorEmail: "alex.rivera.sandbox@indiedev.io",
+    category: "Full-Stack Web App",
+    projectTitle: "PayPal Webhook Signature Verification Hotfix & Unit Tests",
+    initialQuoteUsd: 480,
+    vendorPriceFloorUsd: 410,
+    buyerTargetBudgetUsd: 420,
+    autoCaptureThresholdUsd: 500,
+    buyerBrief:
+      "Micro-milestone under $500 policy threshold: auto-capture PayPal authorization as soon as deterministic SHA-256 and unit test checks pass.",
+  },
 ];
 
 export default function AgentCommandPanel({
@@ -90,6 +92,7 @@ export default function AgentCommandPanel({
   telemetry,
 }: AgentCommandPanelProps) {
   const [panelTab, setPanelTab] = useState<"procure" | "telemetry">("procure");
+  const [negStepIndex, setNegStepIndex] = useState(0);
 
   const [clientBusinessName, setClientBusinessName] = useState(
     PRESET_SCENARIOS[0].clientBusinessName
@@ -117,6 +120,20 @@ export default function AgentCommandPanel({
     PRESET_SCENARIOS[0].autoCaptureThresholdUsd
   );
   const [buyerBrief, setBuyerBrief] = useState(PRESET_SCENARIOS[0].buyerBrief);
+
+  // Step-by-step live feedback while Gemini + PayPal Sandbox execute
+  useEffect(() => {
+    if (!isNegotiating) {
+      setNegStepIndex(0);
+      return;
+    }
+    const t1 = setTimeout(() => setNegStepIndex(1), 650);
+    const t2 = setTimeout(() => setNegStepIndex(2), 1400);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [isNegotiating]);
 
   const applyPreset = (idx: number) => {
     const p = PRESET_SCENARIOS[idx];
@@ -188,18 +205,18 @@ export default function AgentCommandPanel({
                 <Zap className="w-3.5 h-3.5 text-[#FFC439]" />
                 Two-Agent Negotiation & PayPal Hold Launcher
               </h3>
-              <p className="text-[11px] text-slate-400 mt-0.5">
+              <p className="text-xs text-slate-400 mt-0.5">
                 Buyer Agent negotiates against the Freelancer Agent&apos;s{" "}
                 <strong className="text-amber-300">hard price floor</strong>,
-                then invokes <code className="text-slate-200">@paypal/agent-toolkit</code>{" "}
-                to create the Invoice and <code className="text-sky-300">intent: AUTHORIZE</code> Order.
+                then calls <code className="text-slate-200">@paypal/agent-toolkit</code>{" "}
+                to create the Invoice and <code className="text-sky-300">intent: AUTHORIZE</code> Hold.
               </p>
             </div>
 
             {/* Scenarios */}
             <div className="space-y-1">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                Load Scenario (Varying Vendor Floors & Thresholds):
+                1-Click Presets (Varying Vendor Floors & Thresholds):
               </span>
               <div className="flex flex-col gap-1.5">
                 {PRESET_SCENARIOS.map((preset, idx) => (
@@ -260,7 +277,7 @@ export default function AgentCommandPanel({
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-amber-300 mb-1">
+                <label className="block text-[10px] text-amber-300 mb-1 font-bold">
                   Vendor Floor ($)
                 </label>
                 <input
@@ -271,7 +288,7 @@ export default function AgentCommandPanel({
                   onChange={(e) =>
                     setVendorPriceFloorUsd(Number(e.target.value))
                   }
-                  className="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-amber-500/40 text-xs text-amber-300 font-mono"
+                  className="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-amber-500/40 text-xs text-amber-300 font-mono font-bold"
                 />
               </div>
               <div>
@@ -317,7 +334,6 @@ export default function AgentCommandPanel({
                     setAutoCaptureThresholdUsd(Number(e.target.value))
                   }
                   className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-emerald-300 font-mono"
-                  title="Contracts above this USD amount require Human Buyer Sign-Off before capture"
                 />
               </div>
             </div>
@@ -334,17 +350,62 @@ export default function AgentCommandPanel({
                 className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white"
               />
             </div>
+
+            {/* Live Streaming Progress Card During Gemini + PayPal Calls */}
+            {isNegotiating && (
+              <div className="p-3 rounded-xl bg-blue-950/60 border border-sky-500/40 space-y-1.5 text-xs">
+                <div className="flex items-center gap-2 text-sky-200 font-semibold">
+                  {negStepIndex > 0 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  ) : (
+                    <Loader2 className="w-3.5 h-3.5 text-[#FFC439] animate-spin shrink-0" />
+                  )}
+                  <span>
+                    1. Gemini 3.8 Flash negotiating against ${vendorPriceFloorUsd.toLocaleString()} vendor floor...
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-sky-200 font-semibold">
+                  {negStepIndex > 1 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  ) : negStepIndex === 1 ? (
+                    <Loader2 className="w-3.5 h-3.5 text-[#FFC439] animate-spin shrink-0" />
+                  ) : (
+                    <span className="w-3.5 h-3.5 rounded-full border border-slate-600 shrink-0" />
+                  )}
+                  <span>
+                    2. Calling @paypal/agent-toolkit create_invoice...
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-sky-200 font-semibold">
+                  {negStepIndex === 2 ? (
+                    <Loader2 className="w-3.5 h-3.5 text-[#FFC439] animate-spin shrink-0" />
+                  ) : (
+                    <span className="w-3.5 h-3.5 rounded-full border border-slate-600 shrink-0" />
+                  )}
+                  <span>
+                    3. Placing PayPal Order v2 Hold (intent: AUTHORIZE)...
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           <button
             type="submit"
             disabled={isNegotiating}
-            className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-gradient-to-r from-[#FFC439] to-[#F5B000] hover:brightness-105 text-slate-950 shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
+            className="w-full py-3 px-4 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#FFC439] to-[#F5B000] hover:brightness-105 text-slate-950 shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
           >
-            <Sparkles className="w-4 h-4 text-[#003087]" />
-            {isNegotiating
-              ? "Agents Negotiating & Creating PayPal Hold..."
-              : "Negotiate vs Vendor Floor & Create PayPal Hold"}
+            {isNegotiating ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin text-[#003087]" />
+                Negotiating & Placing PayPal Hold...
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4 text-[#003087]" />
+                Negotiate vs Vendor Floor & Place PayPal Hold
+              </>
+            )}
           </button>
         </form>
       )}

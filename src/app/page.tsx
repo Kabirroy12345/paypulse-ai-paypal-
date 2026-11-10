@@ -11,21 +11,18 @@ import PayPulseAgGrid from "@/components/PayPulseAgGrid";
 import PayPalEscrowWorkbench from "@/components/PayPalEscrowWorkbench";
 import AgentCommandPanel from "@/components/AgentCommandPanel";
 import {
-  ShieldCheck,
   Sparkles,
   Wallet,
-  TrendingDown,
   Settings,
-  CheckCircle2,
   X,
   Copy,
   Check,
   Code2,
   KeyRound,
-  Cpu,
   Layers,
   Building2,
   Briefcase,
+  RotateCcw,
 } from "lucide-react";
 
 export default function PayPulseHomePage() {
@@ -36,13 +33,16 @@ export default function PayPulseHomePage() {
   const [telemetry, setTelemetry] =
     useState<AgentTelemetryEvent[]>(INITIAL_TELEMETRY);
 
-  // Two-sided perspective switcher: Small Business Buyer vs Freelancer/Agency Vendor
+  // Unmistakable two-sided role state: BUYER vs VENDOR (Freelancer)
   const [activePerspective, setActivePerspective] = useState<
     "BUYER" | "VENDOR"
   >("BUYER");
 
   const [isNegotiating, setIsNegotiating] = useState(false);
   const [processingDealId, setProcessingDealId] = useState<string | null>(null);
+  const [processingStageText, setProcessingStageText] = useState<string | null>(
+    null
+  );
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Payload Inspector Modal
@@ -111,39 +111,14 @@ export default function PayPulseHomePage() {
     }, 6000);
   };
 
-  const kpis = useMemo(() => {
-    const totalInitial = deals.reduce((s, d) => s + d.initialQuoteUsd, 0);
-    const totalNegotiated = deals.reduce((s, d) => s + d.aiNegotiatedUsd, 0);
-    const totalSavings = deals.reduce((s, d) => s + d.savingsUsd, 0);
-    const savingsPct =
-      totalInitial > 0
-        ? ((totalSavings / totalInitial) * 100).toFixed(1)
-        : "0.0";
-    const settledAmount = deals
-      .filter((d) => d.status === "CAPTURED_AND_SPLIT_PAID")
-      .reduce((s, d) => s + d.aiNegotiatedUsd, 0);
-    const activeHolds = deals
-      .filter(
-        (d) =>
-          d.status === "AUTHORIZED_HOLD" ||
-          d.status === "AWAITING_BUYER_SIGN_OFF" ||
-          d.status === "INVOICED"
-      )
-      .reduce((s, d) => s + d.aiNegotiatedUsd, 0);
-    const blockedAmount = deals
-      .filter((d) => d.status === "HOLD_BLOCKED_FAILED_CHECKS")
-      .reduce((s, d) => s + d.aiNegotiatedUsd, 0);
-
-    return {
-      totalInitial,
-      totalNegotiated,
-      totalSavings,
-      savingsPct,
-      settledAmount,
-      activeHolds,
-      blockedAmount,
-    };
-  }, [deals]);
+  // 1-Click Demo Reset for Clean Video Recording
+  const handleResetDemo = () => {
+    setDeals(INITIAL_DEALS);
+    setSelectedDealId(INITIAL_DEALS[0].id);
+    setTelemetry(INITIAL_TELEMETRY);
+    setActivePerspective("BUYER");
+    showToast("Demo reset to clean initial contracts for recording!");
+  };
 
   // Handler 1: Two-Agent Negotiation (Buyer Target vs Vendor Floor) + @paypal/agent-toolkit Order & Invoice
   const handleLaunchNegotiation = async (payload: {
@@ -176,7 +151,7 @@ export default function PayPulseHomePage() {
           setTelemetry((prev) => [data.telemetry, ...prev]);
         }
         showToast(
-          `Agreed at $${data.deal.aiNegotiatedUsd.toLocaleString()} (-${data.deal.savingsPct}% vs $${data.deal.vendorPriceFloorUsd.toLocaleString()} vendor floor) -> Created PayPal Hold Order ${data.deal.paypalOrderId}!`
+          `Negotiated $${data.deal.initialQuoteUsd.toLocaleString()} → $${data.deal.aiNegotiatedUsd.toLocaleString()} (-${data.deal.savingsPct}% vs $${data.deal.vendorPriceFloorUsd.toLocaleString()} floor) & placed PayPal Hold ${data.deal.paypalOrderId}!`
         );
       }
     } finally {
@@ -193,6 +168,17 @@ export default function PayPulseHomePage() {
     imageMimeType?: string
   ) => {
     setProcessingDealId(deal.id);
+    setProcessingStageText(
+      `[Stage 1/2] Computing SHA-256 hash, unit test pass rate & bundle size on "${
+        fileName || deal.submittedFileName
+      }"...`
+    );
+    const stageTimer = setTimeout(() => {
+      setProcessingStageText(
+        `[Stage 2/2] Running Gemini 3.8 Flash semantic review & checking $${deal.autoCaptureThresholdUsd} buyer approval gate...`
+      );
+    }, 600);
+
     try {
       const res = await fetch("/api/agent/audit", {
         method: "POST",
@@ -218,29 +204,40 @@ export default function PayPulseHomePage() {
 
         if (data.deal.status === "AWAITING_BUYER_SIGN_OFF") {
           showToast(
-            `All deterministic & Gemini 3.8 checks PASSED on ${data.deal.submittedFileName}! Routed to Human Buyer Sign-Off ($${data.deal.aiNegotiatedUsd.toLocaleString()} > $${data.deal.autoCaptureThresholdUsd} policy cap).`
+            `Checks PASSED on ${data.deal.submittedFileName}! Ready for Buyer Approval ($${data.deal.aiNegotiatedUsd.toLocaleString()} > $${data.deal.autoCaptureThresholdUsd} auto-capture limit).`
           );
         } else if (data.deal.status === "CAPTURED_AND_SPLIT_PAID") {
           showToast(
-            `Micro-milestone (<= $${data.deal.autoCaptureThresholdUsd}) verified -> Auto-captured Order ${data.deal.paypalOrderId} & sent Split Payout ${data.deal.paypalPayoutBatchId}!`
+            `Micro-milestone (<= $${data.deal.autoCaptureThresholdUsd}) verified → Auto-captured Order ${data.deal.paypalOrderId} & sent Split Payout ${data.deal.paypalPayoutBatchId}!`
           );
         } else {
           showToast(
-            `CAPTURE BLOCKED: ${data.deal.submittedFileName} failed deterministic checks. $${data.deal.aiNegotiatedUsd.toLocaleString()} USD hold remains uncaptured.`
+            `STAGE 1 FAILED: ${data.deal.submittedFileName} failed deterministic checks. PayPal capture is blocked.`
           );
         }
       }
     } finally {
+      clearTimeout(stageTimer);
       setProcessingDealId(null);
+      setProcessingStageText(null);
     }
   };
 
-  // Handler 3: Explicit Human Buyer Sign-Off (Captures PayPal Authorization & Releases Split Payout)
+  // Handler 3: Explicit Human Buyer Approval (Captures PayPal Hold & Releases Split Payout)
   const handleHumanBuyerApprove = async (
     deal: EscrowDeal,
     approverName?: string
   ) => {
     setProcessingDealId(deal.id);
+    setProcessingStageText(
+      `[1/2] Capturing PayPal Authorization Hold ${deal.paypalOrderId} ($${deal.aiNegotiatedUsd.toLocaleString()}.00 USD)...`
+    );
+    const t = setTimeout(() => {
+      setProcessingStageText(
+        `[2/2] Disbursing Split Payout (POST /v1/payments/payouts) across ${deal.splitRecipients.length} recipients...`
+      );
+    }, 550);
+
     try {
       const res = await fetch("/api/agent/audit", {
         method: "POST",
@@ -249,7 +246,7 @@ export default function PayPulseHomePage() {
           deal,
           humanApprovalAction: "APPROVE_AND_CAPTURE",
           humanApproverName:
-            approverName || `${deal.clientBusinessName} (Authorized Buyer)`,
+            approverName || `${deal.clientBusinessName} (Buyer Approved)`,
           runtime: runtimeCreds,
         }),
       });
@@ -263,11 +260,13 @@ export default function PayPulseHomePage() {
           setTelemetry((prev) => [data.telemetry, ...prev]);
         }
         showToast(
-          `Human Buyer Sign-Off recorded! Captured PayPal Order ${data.deal.paypalOrderId} (${data.deal.paypalCaptureId}) & disbursed Split Payout Batch ${data.deal.paypalPayoutBatchId}!`
+          `Buyer Approved! Captured PayPal Hold ${data.deal.paypalOrderId} & sent Split Payout Batch ${data.deal.paypalPayoutBatchId}!`
         );
       }
     } finally {
+      clearTimeout(t);
       setProcessingDealId(null);
+      setProcessingStageText(null);
     }
   };
 
@@ -284,84 +283,78 @@ export default function PayPulseHomePage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#050914] text-slate-100">
-      {/* Top Executive Navigation Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-[#070C1B]/90 backdrop-blur-md">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
-          {/* Brand Logo & Title */}
+      {/* Top Bar with Unmistakable Role Switch & 1-Click Reset */}
+      <header className="sticky top-0 z-30 border-b border-slate-800 bg-[#070C1B]/95 backdrop-blur-md">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3">
+          {/* Brand Logo */}
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-[#003087] via-[#0070BA] to-[#009CDE] flex items-center justify-center shadow-lg shadow-blue-950/60 border border-sky-400/30">
+            <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-[#003087] via-[#0070BA] to-[#009CDE] flex items-center justify-center shadow border border-sky-400/30">
               <Wallet className="w-5 h-5 text-[#FFC439]" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-lg font-extrabold tracking-tight text-white">
+                <h1 className="text-base font-extrabold tracking-tight text-white">
                   PayPulse <span className="text-[#009CDE]">AI</span>
                 </h1>
-                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#FFC439]/15 text-[#FFC439] border border-[#FFC439]/30">
-                  Hold-Then-Capture Milestone Payments
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-800 text-sky-300 border border-slate-700">
+                  Hold-Then-Capture Milestones
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
-                For Small Businesses Hiring Freelancers & Agencies • Powered by @paypal/agent-toolkit, Gemini 3.8 Flash & AG Grid
+              <p className="text-[11px] text-slate-400">
+                Small Businesses Hiring Freelancers • @paypal/agent-toolkit + Gemini 3.8 Flash
               </p>
             </div>
           </div>
 
-          {/* Two-Sided Perspective Switcher + Live Sandbox Status */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Two-Sided Role Toggle */}
-            <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-800">
-              <button
-                onClick={() => setActivePerspective("BUYER")}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                  activePerspective === "BUYER"
-                    ? "bg-[#0070BA] text-white shadow"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <Building2 className="w-3.5 h-3.5" />
-                Small Business Client (Buyer)
-              </button>
-              <button
-                onClick={() => setActivePerspective("VENDOR")}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                  activePerspective === "VENDOR"
-                    ? "bg-[#FFC439] text-slate-950 shadow"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <Briefcase className="w-3.5 h-3.5" />
-                Freelancer / Agency (Vendor)
-              </button>
-            </div>
+          {/* Unmistakable Role Switcher (Buyer vs Freelancer) */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border-2 border-slate-700 shadow-inner">
+            <button
+              onClick={() => setActivePerspective("BUYER")}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1.5 transition ${
+                activePerspective === "BUYER"
+                  ? "bg-[#0070BA] text-white shadow-md"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <Building2 className="w-4 h-4" />
+              Buyer View (Small Business)
+            </button>
+            <button
+              onClick={() => setActivePerspective("VENDOR")}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1.5 transition ${
+                activePerspective === "VENDOR"
+                  ? "bg-[#FFC439] text-slate-950 shadow-md"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <Briefcase className="w-4 h-4" />
+              Freelancer View (Vendor)
+            </button>
+          </div>
 
-            <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
-              <Cpu className="w-3.5 h-3.5 text-sky-400" />
-              <span>Gemini 3.8 Flash</span>
-              <span
-                className={`font-mono ${
-                  apiStatus.geminiConfigured
-                    ? "text-emerald-400"
-                    : "text-amber-400"
-                }`}
-              >
-                ●
-              </span>
-            </div>
-
-            <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
+          {/* Right Controls: Sandbox Status, Reset Demo, API Keys */}
+          <div className="flex items-center gap-2">
+            <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
               <Layers className="w-3.5 h-3.5 text-[#FFC439]" />
               <span>
                 {apiStatus.paypalTokenVerified
-                  ? "PayPal Sandbox: Live Connected"
-                  : "PayPal Sandbox: Add Keys for Live API"}
+                  ? "Sandbox: Live Connected"
+                  : "Sandbox Ready"}
               </span>
             </div>
 
-            {/* Credentials & Sandbox Settings Button */}
+            <button
+              onClick={handleResetDemo}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition"
+              title="Reset contracts to clean initial state for video recording"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+              Reset Demo
+            </button>
+
             <button
               onClick={() => setShowSettingsModal(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 transition"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 transition"
             >
               <Settings className="w-3.5 h-3.5 text-sky-400" />
               API Keys
@@ -372,136 +365,27 @@ export default function PayPulseHomePage() {
 
       {/* Live Toast Banner */}
       {toastMessage && (
-        <div className="bg-gradient-to-r from-[#003087] via-[#0070BA] to-[#003087] border-b border-sky-400/30 px-4 py-2 text-center text-xs font-semibold text-white flex items-center justify-center gap-2 shadow-lg">
+        <div className="bg-gradient-to-r from-[#003087] via-[#0070BA] to-[#003087] border-b border-sky-400/30 px-4 py-2 text-center text-xs font-bold text-white flex items-center justify-center gap-2 shadow-lg">
           <Sparkles className="w-4 h-4 text-[#FFC439] shrink-0" />
           <span>{toastMessage}</span>
         </div>
       )}
 
-      {/* Main Content Container */}
-      <main className="max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5 flex-1">
-        {/* 4 Executive Financial KPI Cards */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="p-4 rounded-2xl border border-slate-800/90 bg-gradient-to-br from-[#0B1120] to-[#0F172A] shadow-xl">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Authorized Milestone Volume
-              </span>
-              <div className="p-2 rounded-lg bg-blue-500/15 text-sky-400">
-                <Wallet className="w-4 h-4" />
-              </div>
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-mono font-extrabold text-white">
-                ${kpis.totalNegotiated.toLocaleString()}
-              </span>
-              <span className="text-xs font-mono text-slate-400 line-through">
-                ${kpis.totalInitial.toLocaleString()}
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-1">
-              Across {deals.length} PayPal Orders v2 (intent: AUTHORIZE) & Invoices
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-[#0B1120] via-[#09191F] to-[#0B1120] shadow-xl">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                Negotiated Client Savings
-              </span>
-              <div className="p-2 rounded-lg bg-emerald-500/15 text-emerald-400">
-                <TrendingDown className="w-4 h-4" />
-              </div>
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-mono font-extrabold text-emerald-400">
-                ${kpis.totalSavings.toLocaleString()}
-              </span>
-              <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
-                -{kpis.savingsPct}% Avg
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-1">
-              Bounded by each freelancer/agency&apos;s walk-away price floor
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl border border-sky-500/25 bg-gradient-to-br from-[#0B1120] via-[#0A1529] to-[#0B1120] shadow-xl">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-sky-400">
-                Active Holds & Captured Payouts
-              </span>
-              <div className="p-2 rounded-lg bg-sky-500/15 text-sky-400">
-                <CheckCircle2 className="w-4 h-4" />
-              </div>
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-mono font-extrabold text-white">
-                ${kpis.activeHolds.toLocaleString()}
-              </span>
-              <span className="text-xs font-mono text-emerald-400">
-                + ${kpis.settledAmount.toLocaleString()} Captured
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-1">
-              Requires Human Buyer Sign-Off above $500 policy threshold
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl border border-amber-500/25 bg-gradient-to-br from-[#0B1120] via-[#19130D] to-[#0B1120] shadow-xl">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-[#FFC439]">
-                Blocked by Deterministic Gate
-              </span>
-              <div className="p-2 rounded-lg bg-amber-500/15 text-[#FFC439]">
-                <ShieldCheck className="w-4 h-4" />
-              </div>
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-mono font-extrabold text-[#FFC439]">
-                ${kpis.blockedAmount.toLocaleString()}
-              </span>
-              <span className="text-xs font-mono text-rose-300">
-                Uncaptured Hold
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-1">
-              Hard-blocked by unit test, bundle size & SARIF CVE checks
-            </p>
-          </div>
-        </section>
-
-        {/* Top Full-Width AG Grid Community v33 Command Center */}
-        <section>
-          <PayPulseAgGrid
-            deals={deals}
-            selectedDealId={selectedDeal.id}
-            activePerspective={activePerspective}
-            onSelectDeal={(deal) => setSelectedDealId(deal.id)}
-            onInspectDeliverableFile={(deal) =>
-              handleRunFileVerification(
-                deal,
-                deal.submittedFileName,
-                deal.submittedFileRawContent
-              )
-            }
-            onHumanApproveCapture={(deal) => handleHumanBuyerApprove(deal)}
-            onOpenPayloadModal={(deal) => setPayloadModalDeal(deal)}
-            isProcessingId={processingDealId}
-          />
-        </section>
-
-        {/* Bottom Split Workspace */}
+      {/* Main Content: Per-Contract Detail Workbench First (Above the Fold for Video), AG Grid Below */}
+      <main className="max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-4 space-y-5 flex-1">
+        {/* Primary Per-Contract Detail View + New Contract Launcher */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          <div className="lg:col-span-7">
+          <div className="lg:col-span-8">
             <PayPalEscrowWorkbench
               deal={selectedDeal}
               activePerspective={activePerspective}
+              onSwitchPerspective={(role) => setActivePerspective(role)}
               paypalClientId={
                 runtimeCreds.paypalClientId ||
                 process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID
               }
               isProcessing={processingDealId === selectedDeal.id}
+              processingStageText={processingStageText}
               onRunFileVerification={(
                 deal,
                 fileName,
@@ -524,13 +408,33 @@ export default function PayPulseHomePage() {
             />
           </div>
 
-          <div className="lg:col-span-5">
+          <div className="lg:col-span-4">
             <AgentCommandPanel
               onLaunchNegotiation={handleLaunchNegotiation}
               isNegotiating={isNegotiating}
               telemetry={telemetry}
             />
           </div>
+        </section>
+
+        {/* AG Grid Community v33 Multi-Contract Ledger */}
+        <section>
+          <PayPulseAgGrid
+            deals={deals}
+            selectedDealId={selectedDeal.id}
+            activePerspective={activePerspective}
+            onSelectDeal={(deal) => setSelectedDealId(deal.id)}
+            onInspectDeliverableFile={(deal) =>
+              handleRunFileVerification(
+                deal,
+                deal.submittedFileName,
+                deal.submittedFileRawContent
+              )
+            }
+            onHumanApproveCapture={(deal) => handleHumanBuyerApprove(deal)}
+            onOpenPayloadModal={(deal) => setPayloadModalDeal(deal)}
+            isProcessingId={processingDealId}
+          />
         </section>
       </main>
 
