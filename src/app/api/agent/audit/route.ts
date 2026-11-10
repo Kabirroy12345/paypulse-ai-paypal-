@@ -1,128 +1,120 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import {
   buildVerificationAuditTrail,
   runDeterministicFileChecks,
   runGeminiDeliverableSemanticReview,
 } from "@/lib/verification-engine";
-import { captureAndSplitPayoutPayPal } from "@/lib/paypal-server";
-import { AgentTelemetryEvent, EscrowDeal, RuntimeCredentials } from "@/types/paypulse";
+import { settleDeal } from "@/lib/settlement";
+import {
+  MAX_DELIVERABLE_BYTES,
+  MAX_IMAGE_BASE64_CHARS,
+  ValidationError,
+  validateDealId,
+} from "@/lib/validation";
+import {
+  addTelemetry,
+  findDeal,
+  getSession,
+  jsonWithSession,
+  saveDeal,
+  tryLock,
+  unlock,
+} from "@/lib/deal-store";
+import { HttpError, errorResponse, readJson, readRuntimeCredentials } from "@/lib/http";
+import { AgentTelemetryEvent, EscrowDeal } from "@/types/paypulse";
 
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/**
+ * The client sends only a dealId (plus the file to verify, or an approval action).
+ * The deal itself, its amount, recipients, gate results and status are always read from the server-side store.
+ */
 export async function POST(req: NextRequest) {
   const startMs = Date.now();
+  const { sid, session } = getSession(req);
+  let lockedId: string | null = null;
+
   try {
-    const body = await req.json();
-    const {
-      deal,
-      submittedFileName,
-      submittedFileContent,
-      humanApprovalAction,
-      humanApproverName,
-      imageBase64,
-      imageMimeType,
-      runtime,
-    } = body as {
-      deal: EscrowDeal;
-      submittedFileName?: string;
-      submittedFileContent?: string;
-      humanApprovalAction?: "APPROVE_AND_CAPTURE";
-      humanApproverName?: string;
-      imageBase64?: string;
-      imageMimeType?: string;
-      runtime?: RuntimeCredentials;
-    };
+    const body = (await readJson(req, 8_000_000)) as Record<string, unknown>;
+    const dealId = validateDealId(body.dealId);
+    const stored = findDeal(session, dealId);
+    if (!stored) throw new HttpError(404, "Contract not found in this session");
+    if (!tryLock(session, dealId)) {
+      throw new HttpError(409, "Another action is already running for this contract");
+    }
+    lockedId = dealId;
 
+    const runtime = readRuntimeCredentials(body);
     const nowTime = new Date().toTimeString().slice(0, 8);
+    const persist = (d: EscrowDeal) => saveDeal(session, d);
 
-    // Path A: Human Buyer explicitly approves capture after deterministic + Gemini checks already passed
-    if (humanApprovalAction === "APPROVE_AND_CAPTURE") {
-      if (!deal.deterministicAudit.allDeterministicPassed) {
-        return NextResponse.json(
-          {
-            error:
-              "Cannot capture: Deterministic verification checks failed on this deliverable.",
-          },
-          { status: 400 }
-        );
-      }
-
-      const settlement = await captureAndSplitPayoutPayPal({
-        orderId: deal.paypalOrderId,
-        authorizationId: deal.paypalAuthorizationId,
-        contractCode: deal.contractCode,
-        totalAmountUsd: deal.aiNegotiatedUsd,
-        splitRecipients: deal.splitRecipients,
-        runtime,
-      });
-
-      const approver =
-        humanApproverName?.trim() || `${deal.clientBusinessName} (Buyer Sign-Off)`;
-
-      const updatedDeal: EscrowDeal = {
-        ...deal,
-        status: "CAPTURED_AND_SPLIT_PAID",
-        humanApprovedBy: approver,
-        paypalCaptureId: settlement.captureId,
-        paypalPayoutBatchId: settlement.payoutBatchId,
-        paypalMode: settlement.mode,
-        splitRecipients: settlement.updatedRecipients,
-        toolkitCallTraces: [
-          ...settlement.toolkitTraces,
-          ...deal.toolkitCallTraces,
-        ],
-        auditTrail: [
-          {
-            id: `at-hum-${Date.now()}`,
-            timestamp: nowTime,
-            actor: "HUMAN_BUYER",
-            action: `${approver} approved final release of $${deal.aiNegotiatedUsd.toLocaleString()} USD. Captured Order ${deal.paypalOrderId} (${settlement.captureId}) & disbursed Split Payout Batch ${settlement.payoutBatchId}.`,
-            cryptographicHash: `sha256:${deal.deterministicAudit.sha256Digest}`,
-            status: "PASS",
-          },
-          ...deal.auditTrail,
-        ],
-        agentNegotiationLog: [
-          ...deal.agentNegotiationLog,
-          {
-            id: `log-hum-${Date.now()}`,
-            timestamp: nowTime,
-            speaker: "PAYPAL_TOOLKIT",
-            message: `Human Buyer (${approver}) signed off on capture. Executed PayPal Capture ${settlement.captureId} & Batch Payout ${settlement.payoutBatchId} ($${deal.aiNegotiatedUsd.toLocaleString()} USD).`,
-            badge: `CAPTURED: ${settlement.captureId}`,
-          },
-        ],
-        rawPayPalPayload: settlement.rawPayload,
-        updatedAt: "Just now",
-      };
-
-      const telemetry: AgentTelemetryEvent = {
-        id: `tel-${Date.now()}`,
-        timestamp: nowTime,
-        agentName: "PayPal-Agent-Toolkit",
-        action: "Human Buyer Approved -> Captured PayPal Hold & Sent Split Payout",
-        endpoint: "POST /v1/payments/payouts",
-        contractCode: deal.contractCode,
-        status: "SUCCESS",
-        latencyMs: Date.now() - startMs,
-        details: `${approver} approved release -> Capture ${settlement.captureId} & Batch Payout ${settlement.payoutBatchId} ($${deal.aiNegotiatedUsd.toLocaleString()} USD).`,
-      };
-
-      return NextResponse.json({ deal: updatedDeal, telemetry });
+    if (stored.status === "CAPTURED_AND_SPLIT_PAID") {
+      throw new HttpError(409, "This contract has already been captured");
     }
 
-    // Path B: Run 3-Stage Verification Pipeline on the actual submitted file
-    const fileName =
-      submittedFileName?.trim() ||
-      deal.submittedFileName ||
-      "deliverable-manifest.json";
-    const rawContent =
-      submittedFileContent ?? deal.submittedFileRawContent ?? "";
+    // ---------- Path A: buyer approves capture ----------
+    if (body.humanApprovalAction === "APPROVE_AND_CAPTURE") {
+      if (
+        stored.status !== "AWAITING_BUYER_SIGN_OFF" ||
+        !stored.verificationRun ||
+        !stored.deterministicAudit.allDeterministicPassed ||
+        !stored.geminiReview.passed
+      ) {
+        throw new HttpError(
+          409,
+          "Cannot capture: this contract has not passed verification and is not awaiting buyer sign-off"
+        );
+      }
+      const { deal, telemetry } = await settleDeal({
+        deal: stored,
+        via: "HUMAN",
+        runtime,
+        startMs,
+        persist,
+      });
+      saveDeal(session, deal);
+      addTelemetry(session, telemetry);
+      return jsonWithSession(req, sid, { deal, telemetry });
+    }
 
-    // Stage 1: Deterministic Checks (SHA-256, byte size, unit tests, bundle cap, SARIF vulnerabilities)
+    // ---------- Path B: verify a submitted deliverable ----------
+    const fileName =
+      typeof body.submittedFileName === "string" ? body.submittedFileName.trim() : "";
+    const rawContent =
+      typeof body.submittedFileContent === "string" ? body.submittedFileContent : "";
+    if (!fileName || fileName.length > 200) {
+      throw new ValidationError({ submittedFileName: "is required (max 200 characters)" });
+    }
+    if (!rawContent.trim()) {
+      throw new ValidationError({ submittedFileContent: "is required. Load or upload a deliverable first" });
+    }
+    if (Buffer.byteLength(rawContent, "utf8") > MAX_DELIVERABLE_BYTES) {
+      throw new HttpError(413, `Deliverable exceeds ${MAX_DELIVERABLE_BYTES} bytes`);
+    }
+
+    let imageBase64: string | undefined;
+    let imageMimeType: string | undefined;
+    if (body.imageBase64 !== undefined && body.imageBase64 !== null && body.imageBase64 !== "") {
+      if (
+        typeof body.imageBase64 !== "string" ||
+        body.imageBase64.length > MAX_IMAGE_BASE64_CHARS ||
+        !/^[A-Za-z0-9+/=]+$/.test(body.imageBase64)
+      ) {
+        throw new ValidationError({ imageBase64: "must be a base64 image under ~4.5 MB" });
+      }
+      if (typeof body.imageMimeType !== "string" || !IMAGE_TYPES.includes(body.imageMimeType)) {
+        throw new ValidationError({ imageMimeType: `must be one of ${IMAGE_TYPES.join(", ")}` });
+      }
+      imageBase64 = body.imageBase64;
+      imageMimeType = body.imageMimeType;
+    }
+
+    // Stage 1: deterministic checks on the real bytes
     const deterministicReport = runDeterministicFileChecks(fileName, rawContent);
 
-    // Stage 2: Gemini 3.8 Flash Semantic & Multimodal Inspection of actual file contents
+    // Stage 2: Gemini semantic review (cannot override a Stage 1 failure)
     const geminiReview = await runGeminiDeliverableSemanticReview({
-      deal,
+      deal: stored,
       fileName,
       rawContent,
       deterministicReport,
@@ -131,186 +123,157 @@ export async function POST(req: NextRequest) {
       runtime,
     });
 
-    const bothPassed =
-      deterministicReport.allDeterministicPassed && geminiReview.passed;
-    const requiresHumanSignOff =
-      deal.aiNegotiatedUsd > deal.autoCaptureThresholdUsd;
-
-    const updatedTrail = buildVerificationAuditTrail({
-      existingTrail: deal.auditTrail,
+    const bothPassed = deterministicReport.allDeterministicPassed && geminiReview.passed;
+    const requiresHumanSignOff = stored.aiNegotiatedUsd > stored.autoCaptureThresholdUsd;
+    const auditTrail = buildVerificationAuditTrail({
+      existingTrail: stored.auditTrail,
       deterministicReport,
       geminiReview,
       requiresHumanApproval: requiresHumanSignOff,
-      dealAmountUsd: deal.aiNegotiatedUsd,
-      thresholdUsd: deal.autoCaptureThresholdUsd,
+      dealAmountUsd: stored.aiNegotiatedUsd,
+      thresholdUsd: stored.autoCaptureThresholdUsd,
     });
 
-    // If deterministic or Gemini checks failed -> Hard-block capture!
+    const verifiedBase: EscrowDeal = {
+      ...stored,
+      submittedFileName: fileName,
+      submittedFileRawContent: rawContent,
+      verificationRun: true,
+      deterministicAudit: deterministicReport,
+      geminiReview,
+      deliverableSummary: geminiReview.summary,
+      auditTrail,
+      updatedAt: "Just now",
+    };
+
+    // Failed: hard-block capture
     if (!bothPassed) {
-      const failedCount = deterministicReport.checks.filter(
-        (c) => !c.passed
-      ).length;
-      const updatedDeal: EscrowDeal = {
-        ...deal,
+      const failedCount = deterministicReport.checks.filter((c) => !c.passed).length;
+      const deal: EscrowDeal = {
+        ...verifiedBase,
         status: "HOLD_BLOCKED_FAILED_CHECKS",
-        submittedFileName: fileName,
-        submittedFileRawContent: rawContent,
-        deterministicAudit: deterministicReport,
-        geminiReview,
-        deliverableSummary: geminiReview.summary,
-        splitRecipients: deal.splitRecipients.map((r) => ({
-          ...r,
-          status: "BLOCKED",
-        })),
-        auditTrail: updatedTrail,
+        splitRecipients: stored.splitRecipients.map((r) => ({ ...r, status: "BLOCKED" })),
         agentNegotiationLog: [
-          ...deal.agentNegotiationLog,
+          ...stored.agentNegotiationLog,
           {
             id: `log-fail-${Date.now()}`,
             timestamp: nowTime,
             speaker: "AUDIT_GATE",
-            message: `DETERMINISTIC GATE BLOCKED CAPTURE on ${fileName} (sha256:${deterministicReport.sha256Digest.slice(
-              0,
-              10
-            )}…): ${failedCount} rule(s) failed. ${geminiReview.summary}`,
+            message: `Capture blocked on ${fileName} (sha256:${deterministicReport.sha256Digest.slice(0, 10)}…): ${failedCount} deterministic rule(s) failed. ${geminiReview.summary}`,
             badge: "CAPTURE BLOCKED",
           },
         ],
         rawPayPalPayload: {
-          order_id: deal.paypalOrderId,
-          authorization_id: deal.paypalAuthorizationId,
+          order_id: stored.paypalOrderId,
           intent: "AUTHORIZE",
-          capture_status: "BLOCKED_BY_DETERMINISTIC_VERIFICATION_GATE",
+          capture_status: "BLOCKED_BY_VERIFICATION_GATE",
           submitted_file: fileName,
           sha256_digest: deterministicReport.sha256Digest,
           failed_checks: deterministicReport.checks.filter((c) => !c.passed),
         },
-        updatedAt: "Just now",
       };
-
+      saveDeal(session, deal);
       const telemetry: AgentTelemetryEvent = {
         id: `tel-${Date.now()}`,
         timestamp: nowTime,
         agentName: "Deterministic-Gate",
-        action: `Hard-Blocked Capture on ${fileName} (${failedCount} checks failed)`,
-        endpoint: `BLOCK /v2/checkout/orders/${deal.paypalOrderId}/capture`,
-        contractCode: deal.contractCode,
+        action: `Blocked capture on ${fileName} (${failedCount} rule(s) failed)`,
+        endpoint: "capture blocked in code",
+        contractCode: stored.contractCode,
         status: "WARNING",
         latencyMs: Date.now() - startMs,
-        details: `sha256:${deterministicReport.sha256Digest.slice(0, 12)}… failed deterministic validation. $${deal.aiNegotiatedUsd.toLocaleString()} USD hold remains uncaptured.`,
+        details: `sha256:${deterministicReport.sha256Digest.slice(0, 12)}… failed validation. The $${stored.aiNegotiatedUsd.toFixed(2)} hold stays uncaptured.`,
       };
-
-      return NextResponse.json({ deal: updatedDeal, telemetry });
+      addTelemetry(session, telemetry);
+      return jsonWithSession(req, sid, { deal, telemetry });
     }
 
-    // Both deterministic and Gemini checks passed!
-    // Check Policy Threshold: If amount > autoCaptureThresholdUsd, require Human Buyer Sign-Off!
-    if (requiresHumanSignOff) {
-      const updatedDeal: EscrowDeal = {
-        ...deal,
-        status: "AWAITING_BUYER_SIGN_OFF",
-        submittedFileName: fileName,
-        submittedFileRawContent: rawContent,
-        deterministicAudit: deterministicReport,
-        geminiReview,
-        deliverableSummary: geminiReview.summary,
-        splitRecipients: deal.splitRecipients.map((r) => ({
-          ...r,
-          status: "PENDING",
-        })),
-        auditTrail: updatedTrail,
-        agentNegotiationLog: [
-          ...deal.agentNegotiationLog,
-          {
-            id: `log-pass-gate-${Date.now()}`,
-            timestamp: nowTime,
-            speaker: "AUDIT_GATE",
-            message: `All ${deterministicReport.checks.length} deterministic checks & Gemini 3.8 Flash review PASSED on ${fileName} (sha256:${deterministicReport.sha256Digest.slice(
-              0,
-              10
-            )}…). Because $${deal.aiNegotiatedUsd.toLocaleString()} USD > $${deal.autoCaptureThresholdUsd.toLocaleString()} USD auto-capture limit, routed to Human Buyer for final 1-click capture approval.`,
-            badge: "READY FOR BUYER SIGN-OFF",
-          },
-        ],
-        updatedAt: "Just now",
-      };
+    // Passed, above the auto-capture limit: wait for the human buyer
+    const awaiting: EscrowDeal = {
+      ...verifiedBase,
+      status: "AWAITING_BUYER_SIGN_OFF",
+      splitRecipients: stored.splitRecipients.map((r) => ({ ...r, status: "PENDING" })),
+      agentNegotiationLog: [
+        ...stored.agentNegotiationLog,
+        {
+          id: `log-pass-${Date.now()}`,
+          timestamp: nowTime,
+          speaker: "AUDIT_GATE",
+          message: requiresHumanSignOff
+            ? `All ${deterministicReport.checks.length} deterministic rules and the Stage 2 review passed on ${fileName} (sha256:${deterministicReport.sha256Digest.slice(0, 10)}…). $${stored.aiNegotiatedUsd.toLocaleString()} exceeds the $${stored.autoCaptureThresholdUsd.toLocaleString()} auto-capture limit, so the buyer must sign off.`
+            : `All ${deterministicReport.checks.length} deterministic rules and the Stage 2 review passed on ${fileName}. Within the $${stored.autoCaptureThresholdUsd.toLocaleString()} auto-capture limit.`,
+          badge: requiresHumanSignOff ? "READY FOR BUYER SIGN-OFF" : "CHECKS PASSED",
+        },
+      ],
+    };
 
+    if (requiresHumanSignOff) {
+      saveDeal(session, awaiting);
       const telemetry: AgentTelemetryEvent = {
         id: `tel-${Date.now()}`,
         timestamp: nowTime,
         agentName: "Deterministic-Gate",
-        action: `Verified ${fileName} -> Routed to Human Buyer Sign-Off (> $${deal.autoCaptureThresholdUsd} limit)`,
-        endpoint: "Human-in-the-Loop Policy Gate",
-        contractCode: deal.contractCode,
+        action: `Verified ${fileName}, routed to buyer sign-off (over $${stored.autoCaptureThresholdUsd} limit)`,
+        endpoint: "human-in-the-loop policy gate",
+        contractCode: stored.contractCode,
         status: "INFO",
         latencyMs: Date.now() - startMs,
-        details: `All deterministic & Gemini 3.8 Flash checks passed (sha256:${deterministicReport.sha256Digest.slice(
-          0,
-          12
-        )}…). Waiting for Buyer Sign-Off to capture $${deal.aiNegotiatedUsd.toLocaleString()} USD.`,
+        details: `Checks passed (sha256:${deterministicReport.sha256Digest.slice(0, 12)}…). Waiting for buyer approval to capture $${stored.aiNegotiatedUsd.toFixed(2)}.`,
       };
-
-      return NextResponse.json({ deal: updatedDeal, telemetry });
+      addTelemetry(session, telemetry);
+      return jsonWithSession(req, sid, { deal: awaiting, telemetry });
     }
 
-    // Micro-milestone (<= autoCaptureThresholdUsd): Auto-capture & split payout
-    const settlement = await captureAndSplitPayoutPayPal({
-      orderId: deal.paypalOrderId,
-      authorizationId: deal.paypalAuthorizationId,
-      contractCode: deal.contractCode,
-      totalAmountUsd: deal.aiNegotiatedUsd,
-      splitRecipients: deal.splitRecipients,
-      runtime,
-    });
-
-    const updatedDeal: EscrowDeal = {
-      ...deal,
-      status: "CAPTURED_AND_SPLIT_PAID",
-      humanApprovedBy: `Auto-Capture Policy (<= $${deal.autoCaptureThresholdUsd})`,
-      submittedFileName: fileName,
-      submittedFileRawContent: rawContent,
-      deterministicAudit: deterministicReport,
-      geminiReview,
-      deliverableSummary: geminiReview.summary,
-      paypalCaptureId: settlement.captureId,
-      paypalPayoutBatchId: settlement.payoutBatchId,
-      paypalMode: settlement.mode,
-      splitRecipients: settlement.updatedRecipients,
-      toolkitCallTraces: [
-        ...settlement.toolkitTraces,
-        ...deal.toolkitCallTraces,
-      ],
-      auditTrail: updatedTrail,
-      agentNegotiationLog: [
-        ...deal.agentNegotiationLog,
-        {
-          id: `log-autopay-${Date.now()}`,
-          timestamp: nowTime,
-          speaker: "PAYPAL_TOOLKIT",
-          message: `Passed deterministic + Gemini checks & within $${deal.autoCaptureThresholdUsd} auto-capture threshold. Captured Order ${deal.paypalOrderId} & sent Batch Payout ${settlement.payoutBatchId}.`,
-          badge: `BATCH: ${settlement.payoutBatchId}`,
-        },
-      ],
-      rawPayPalPayload: settlement.rawPayload,
-      updatedAt: "Just now",
-    };
-
-    const telemetry: AgentTelemetryEvent = {
-      id: `tel-${Date.now()}`,
-      timestamp: nowTime,
-      agentName: "PayPal-Agent-Toolkit",
-      action: "Micro-Milestone Verified -> Auto-Captured & Split Paid",
-      endpoint: "POST /v1/payments/payouts",
-      contractCode: deal.contractCode,
-      status: "SUCCESS",
-      latencyMs: Date.now() - startMs,
-      details: `Captured Order ${deal.paypalOrderId} & sent Batch Payout ${settlement.payoutBatchId} ($${deal.aiNegotiatedUsd.toLocaleString()} USD).`,
-    };
-
-    return NextResponse.json({ deal: updatedDeal, telemetry });
-  } catch (err: unknown) {
-    const message =
-      err instanceof Error ? err.message : "Failed to run milestone verification";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // Micro-milestone within the auto-capture limit: settle automatically
+    try {
+      const { deal, telemetry } = await settleDeal({
+        deal: awaiting,
+        via: "AUTO",
+        runtime,
+        startMs,
+        persist,
+      });
+      saveDeal(session, deal);
+      addTelemetry(session, telemetry);
+      return jsonWithSession(req, sid, { deal, telemetry });
+    } catch (e) {
+      // Verification passed but PayPal could not settle (e.g. the buyer has not approved the hold). Keep it recoverable.
+      const message = e instanceof Error ? e.message : "Settlement failed";
+      const recoverable = findDeal(session, dealId) ?? awaiting;
+      const deal: EscrowDeal = {
+        ...recoverable,
+        ...awaiting,
+        paypalAuthorizationId: recoverable.paypalAuthorizationId,
+        paypalCaptureId: recoverable.paypalCaptureId,
+        agentNegotiationLog: [
+          ...awaiting.agentNegotiationLog,
+          {
+            id: `log-defer-${Date.now()}`,
+            timestamp: nowTime,
+            speaker: "PAYPAL_TOOLKIT",
+            message: `Auto-capture deferred: ${message}`,
+            badge: "AUTO-CAPTURE DEFERRED",
+          },
+        ],
+      };
+      saveDeal(session, deal);
+      const telemetry: AgentTelemetryEvent = {
+        id: `tel-${Date.now()}`,
+        timestamp: nowTime,
+        agentName: "PayPal-Agent-Toolkit",
+        action: "Auto-capture deferred",
+        endpoint: "capture",
+        contractCode: stored.contractCode,
+        status: "WARNING",
+        latencyMs: Date.now() - startMs,
+        details: message,
+      };
+      addTelemetry(session, telemetry);
+      return jsonWithSession(req, sid, { deal, telemetry, settlementError: message });
+    }
+  } catch (e) {
+    return errorResponse(e);
+  } finally {
+    if (lockedId) unlock(session, lockedId);
   }
 }

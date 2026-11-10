@@ -145,7 +145,9 @@ export default function PayPulseAgGrid({
         requiresHumanApproval: true,
         status: "CAPTURED_AND_SPLIT_PAID" as DealStatus,
         paypalOrderId: "SUMMARY",
-        paypalMode: "LIVE_SANDBOX" as const,
+        paypalMode: "UNCONFIGURED_SANDBOX_PREVIEW" as const,
+        isDemoSeed: false,
+        verificationRun: false,
         milestoneTitle: "",
         deliverableSummary: "",
         submittedFileName: "",
@@ -325,13 +327,24 @@ export default function PayPulseAgGrid({
             );
           }
           const cfg = STATUS_CONFIG[deal.status];
+          const isSim = deal.isDemoSeed || deal.paypalMode !== "LIVE_SANDBOX";
+          const pillLabel =
+            deal.status === "CAPTURED_AND_SPLIT_PAID" && isSim
+              ? "SIMULATED CAPTURE & SPLIT"
+              : isSim
+              ? `${cfg.label} (PREVIEW)`
+              : cfg.label;
           return (
             <div className="flex items-center h-full">
               <span
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${cfg.bg} ${cfg.text} ${cfg.border}`}
               >
                 {deal.status === "CAPTURED_AND_SPLIT_PAID" && (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <CheckCircle2
+                    className={`w-3.5 h-3.5 ${
+                      isSim ? "text-sky-400" : "text-emerald-400"
+                    }`}
+                  />
                 )}
                 {deal.status === "HOLD_BLOCKED_FAILED_CHECKS" && (
                   <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
@@ -344,7 +357,7 @@ export default function PayPulseAgGrid({
                   deal.status !== "AWAITING_BUYER_SIGN_OFF" && (
                     <Clock className="w-3.5 h-3.5 text-sky-400" />
                   )}
-                {cfg.label}
+                {pillLabel}
               </span>
             </div>
           );
@@ -356,6 +369,18 @@ export default function PayPulseAgGrid({
         cellRenderer: (params: ICellRendererParams<EscrowDeal>) => {
           const deal = params.data;
           if (!deal || deal.id === "SUMMARY_ROW") return null;
+          if (!deal.verificationRun) {
+            return (
+              <div className="flex flex-col justify-center py-1 leading-tight">
+                <span className="text-xs font-semibold text-amber-300">
+                  Awaiting Deliverable
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">
+                  Stage 1 &amp; Stage 2 not run
+                </span>
+              </div>
+            );
+          }
           const det = deal.deterministicAudit;
           const passedRules = det.checks.filter((c) => c.passed).length;
           const totalRules = det.checks.length;
@@ -391,6 +416,7 @@ export default function PayPulseAgGrid({
           const deal = params.data;
           if (!deal || deal.id === "SUMMARY_ROW") return null;
           const isBusy = isProcessingId === deal.id;
+          const isSim = deal.isDemoSeed || deal.paypalMode !== "LIVE_SANDBOX";
 
           return (
             <div className="flex items-center gap-1.5 h-full">
@@ -402,10 +428,14 @@ export default function PayPulseAgGrid({
                   }}
                   disabled={isBusy}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-[#FFC439] hover:bg-[#f5b82e] text-slate-950 shadow-sm transition disabled:opacity-50"
-                  title="Human Buyer Sign-Off: Capture PayPal Authorization & Release Split Payout"
+                  title="Human Buyer Sign-Off: Capture PayPal Authorization & Split Payout"
                 >
                   <UserCheck className="w-3.5 h-3.5" />
-                  {isBusy ? "Capturing..." : "Buyer Sign-Off"}
+                  {isBusy
+                    ? "Working..."
+                    : isSim
+                    ? "Simulate Sign-Off"
+                    : "Buyer Sign-Off"}
                 </button>
               ) : deal.status !== "CAPTURED_AND_SPLIT_PAID" ? (
                 <button
@@ -415,15 +445,21 @@ export default function PayPulseAgGrid({
                   }}
                   disabled={isBusy}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-gradient-to-r from-[#0070BA] to-[#009CDE] hover:brightness-110 text-white shadow-sm transition disabled:opacity-50"
-                  title="Run Deterministic + Gemini 3.8 Flash Inspection on Deliverable File"
+                  title="Open this contract in the workbench above to upload or verify deliverable"
                 >
                   <Play className="w-3 h-3" />
-                  {isBusy ? "Checking..." : "Inspect File"}
+                  Open Workbench
                 </button>
               ) : (
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold border ${
+                    isSim
+                      ? "bg-sky-500/10 text-sky-300 border-sky-500/25"
+                      : "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
+                  }`}
+                >
                   <CheckCircle2 className="w-3 h-3" />
-                  Captured
+                  {isSim ? "Simulated" : "Captured"}
                 </span>
               )}
 
@@ -433,13 +469,13 @@ export default function PayPulseAgGrid({
                   onOpenPayloadModal(deal);
                 }}
                 className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
-                title="Inspect Raw PayPal v2 JSON & @paypal/agent-toolkit Trace"
+                title="Inspect PayPal JSON Payload"
               >
                 <Code2 className="w-3.5 h-3.5 text-sky-400" />
                 JSON
               </button>
 
-              {deal.paypalApprovalUrl && (
+              {deal.paypalApprovalUrl && !isSim && (
                 <a
                   href={deal.paypalApprovalUrl}
                   target="_blank"

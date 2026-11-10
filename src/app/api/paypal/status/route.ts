@@ -1,20 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPayPalAccessToken, resolvePayPalCredentials } from "@/lib/paypal-server";
+import {
+  allowRuntimeCredentials,
+  getPayPalAccessToken,
+  resolvePayPalCredentials,
+  resolvePayPalEnvironment,
+} from "@/lib/paypal-server";
 import { resolveGeminiKey } from "@/lib/gemini-agents";
-import { RuntimeCredentials } from "@/types/paypulse";
+import { readJson, readRuntimeCredentials } from "@/lib/http";
 
 export async function POST(req: NextRequest) {
+  const env = resolvePayPalEnvironment();
   try {
-    const body = (await req.json().catch(() => ({}))) as { runtime?: RuntimeCredentials };
-    const runtime = body.runtime;
+    const body = await readJson(req, 4_000).catch(() => ({}));
+    const runtime = readRuntimeCredentials(body);
 
     const { clientId, hasLiveSandbox } = resolvePayPalCredentials(runtime);
     const geminiKey = resolveGeminiKey(runtime);
 
     let paypalTokenVerified = false;
-    if (hasLiveSandbox) {
-      const token = await getPayPalAccessToken(runtime);
-      paypalTokenVerified = Boolean(token);
+    if (hasLiveSandbox && env.isSupportedSandbox) {
+      paypalTokenVerified = Boolean(await getPayPalAccessToken(runtime));
     }
 
     return NextResponse.json({
@@ -22,7 +27,9 @@ export async function POST(req: NextRequest) {
       paypalTokenVerified,
       paypalClientIdPreview: clientId ? `${clientId.slice(0, 8)}...` : null,
       geminiConfigured: Boolean(geminiKey),
-      environment: "sandbox.paypal.com",
+      allowRuntimeCredentials: allowRuntimeCredentials(),
+      environment: env.isSupportedSandbox ? "sandbox.paypal.com" : `unsupported (${env.environment})`,
+      paypalEnvironmentValid: env.isSupportedSandbox,
       geminiModel: "gemini-3.8-flash",
     });
   } catch {
@@ -30,7 +37,9 @@ export async function POST(req: NextRequest) {
       paypalConfigured: false,
       paypalTokenVerified: false,
       geminiConfigured: false,
-      environment: "sandbox.paypal.com",
+      allowRuntimeCredentials: allowRuntimeCredentials(),
+      environment: env.isSupportedSandbox ? "sandbox.paypal.com" : `unsupported (${env.environment})`,
+      paypalEnvironmentValid: env.isSupportedSandbox,
       geminiModel: "gemini-3.8-flash",
     });
   }

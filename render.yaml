@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: paypulse-ai-escrow-os
+    name: paypulse-ai
     runtime: node
     plan: free
     buildCommand: npm install && npm run build
@@ -10,6 +10,8 @@ services:
         value: production
       - key: PAYPAL_ENVIRONMENT
         value: sandbox
+      - key: ALLOW_RUNTIME_CREDENTIALS
+        value: "false"
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET

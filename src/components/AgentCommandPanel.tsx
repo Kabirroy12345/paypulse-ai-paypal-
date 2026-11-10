@@ -10,23 +10,34 @@ import {
   Terminal,
   Loader2,
   CheckCircle2,
+  Users,
 } from "lucide-react";
 
+export interface NegotiationPayload {
+  clientBusinessName: string;
+  vendorName: string;
+  vendorEmail: string;
+  buyerEmail?: string;
+  category: EscrowDeal["category"];
+  projectTitle: string;
+  initialQuoteUsd: number;
+  vendorPriceFloorUsd: number;
+  buyerTargetBudgetUsd: number;
+  autoCaptureThresholdUsd: number;
+  buyerBrief?: string;
+  collaborator?: {
+    name: string;
+    email: string;
+    sharePct: number;
+    role: string;
+  };
+}
+
 interface AgentCommandPanelProps {
-  onLaunchNegotiation: (payload: {
-    clientBusinessName: string;
-    vendorName: string;
-    vendorEmail: string;
-    category: EscrowDeal["category"];
-    projectTitle: string;
-    initialQuoteUsd: number;
-    vendorPriceFloorUsd: number;
-    buyerTargetBudgetUsd: number;
-    autoCaptureThresholdUsd: number;
-    buyerBrief?: string;
-  }) => Promise<void>;
+  onLaunchNegotiation: (payload: NegotiationPayload) => Promise<void>;
   isNegotiating: boolean;
   telemetry: AgentTelemetryEvent[];
+  liveMode: boolean;
 }
 
 const PRESET_SCENARIOS: Array<{
@@ -44,9 +55,9 @@ const PRESET_SCENARIOS: Array<{
 }> = [
   {
     label: "🛍️ Headless PayPal Checkout ($3,800 Quote vs $3,250 Floor)",
-    clientBusinessName: "Bramble & Twine Artisan Goods",
-    vendorName: "Kestrel Commerce Engineering",
-    vendorEmail: "billing-sandbox@kestrelcommerce.dev",
+    clientBusinessName: "Bramble & Twine Goods (demo)",
+    vendorName: "Kestrel Commerce Studio (demo)",
+    vendorEmail: "billing@kestrel-commerce.example",
     category: "E-Commerce & Checkout Dev",
     projectTitle: "Next.js Storefront + PayPal Orders v2 Authorization Flow",
     initialQuoteUsd: 3800,
@@ -58,9 +69,9 @@ const PRESET_SCENARIOS: Array<{
   },
   {
     label: "🛡️ Tight-Floor Security Audit ($2,100 Quote vs $1,960 Floor)",
-    clientBusinessName: "CivicHealth Telemedicine Clinic",
-    vendorName: "Bastion AppSec Collective",
-    vendorEmail: "settlements-sandbox@bastionsec.io",
+    clientBusinessName: "CivicHealth Clinic (demo)",
+    vendorName: "Bastion AppSec (demo)",
+    vendorEmail: "settlements@bastion-appsec.example",
     category: "Security & QA Audit",
     projectTitle: "OAuth2 & PayPal Payouts Webhook Penetration Test",
     initialQuoteUsd: 2100,
@@ -68,13 +79,13 @@ const PRESET_SCENARIOS: Array<{
     buyerTargetBudgetUsd: 1800,
     autoCaptureThresholdUsd: 500,
     buyerBrief:
-      "Buyer wants $1,800, but vendor's hard labor floor is $1,960 — watch the Vendor Agent defend its floor and settle near $1,990.",
+      "Buyer wants $1,800, but vendor's hard labor floor is $1,960 — watch the Vendor Agent defend its floor and settle above $1,960.",
   },
   {
     label: "⚡ Micro-Milestone Bugfix ($480 Quote <= $500 Auto-Capture)",
-    clientBusinessName: "nomadPod Podcast Studio",
-    vendorName: "Alex Rivera (Independent Freelancer)",
-    vendorEmail: "alex.rivera.sandbox@indiedev.io",
+    clientBusinessName: "NomadPod Studio (demo)",
+    vendorName: "Alex Rivera (demo freelancer)",
+    vendorEmail: "alex.rivera@indiedev.example",
     category: "Full-Stack Web App",
     projectTitle: "PayPal Webhook Signature Verification Hotfix & Unit Tests",
     initialQuoteUsd: 480,
@@ -82,7 +93,7 @@ const PRESET_SCENARIOS: Array<{
     buyerTargetBudgetUsd: 420,
     autoCaptureThresholdUsd: 500,
     buyerBrief:
-      "Micro-milestone under $500 policy threshold: auto-capture PayPal authorization as soon as deterministic SHA-256 and unit test checks pass.",
+      "Micro-milestone under $500 policy threshold: auto-capture authorization as soon as deterministic SHA-256 and unit test checks pass.",
   },
 ];
 
@@ -90,6 +101,7 @@ export default function AgentCommandPanel({
   onLaunchNegotiation,
   isNegotiating,
   telemetry,
+  liveMode,
 }: AgentCommandPanelProps) {
   const [panelTab, setPanelTab] = useState<"procure" | "telemetry">("procure");
   const [negStepIndex, setNegStepIndex] = useState(0);
@@ -121,7 +133,12 @@ export default function AgentCommandPanel({
   );
   const [buyerBrief, setBuyerBrief] = useState(PRESET_SCENARIOS[0].buyerBrief);
 
-  // Step-by-step live feedback while Gemini + PayPal Sandbox execute
+  const [enableSplit, setEnableSplit] = useState(false);
+  const [collabName, setCollabName] = useState("");
+  const [collabEmail, setCollabEmail] = useState("");
+  const [collabRole, setCollabRole] = useState("QA Specialist");
+  const [collabSharePct, setCollabSharePct] = useState(20);
+
   useEffect(() => {
     if (!isNegotiating) {
       setNegStepIndex(0);
@@ -160,8 +177,17 @@ export default function AgentCommandPanel({
       initialQuoteUsd: Number(initialQuoteUsd) || 2500,
       vendorPriceFloorUsd: Number(vendorPriceFloorUsd) || 2100,
       buyerTargetBudgetUsd: Number(buyerTargetBudgetUsd) || 2000,
-      autoCaptureThresholdUsd: Number(autoCaptureThresholdUsd) || 500,
+      autoCaptureThresholdUsd: Number(autoCaptureThresholdUsd) ?? 500,
       buyerBrief,
+      collaborator:
+        enableSplit && collabName.trim() && collabEmail.trim()
+          ? {
+              name: collabName.trim(),
+              email: collabEmail.trim(),
+              sharePct: Number(collabSharePct) || 20,
+              role: collabRole.trim() || "Collaborator",
+            }
+          : undefined,
     });
   };
 
@@ -189,7 +215,7 @@ export default function AgentCommandPanel({
           }`}
         >
           <Activity className="w-3.5 h-3.5 text-emerald-400" />
-          Live API & Gate Log ({telemetry.length})
+          API &amp; Gate Log ({telemetry.length})
         </button>
       </div>
 
@@ -199,24 +225,26 @@ export default function AgentCommandPanel({
           onSubmit={handleSubmitProcure}
           className="p-4 space-y-3 flex-1 flex flex-col justify-between"
         >
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             <div>
               <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5 text-[#FFC439]" />
-                Two-Agent Negotiation & PayPal Hold Launcher
+                Two-Agent Negotiation &amp; Hold Launcher
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Buyer Agent negotiates against the Freelancer Agent&apos;s{" "}
+                Buyer Agent negotiates against the Freelancer&apos;s{" "}
                 <strong className="text-amber-300">hard price floor</strong>,
-                then calls <code className="text-slate-200">@paypal/agent-toolkit</code>{" "}
-                to create the Invoice and <code className="text-sky-300">intent: AUTHORIZE</code> Hold.
+                then{" "}
+                {liveMode
+                  ? "creates a real PayPal Sandbox Invoice & intent: AUTHORIZE Order."
+                  : "simulates the PayPal Invoice & intent: AUTHORIZE Order (preview mode)."}
               </p>
             </div>
 
             {/* Scenarios */}
             <div className="space-y-1">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                1-Click Presets (Varying Vendor Floors & Thresholds):
+                Demo Presets (`.example` placeholders — edit email for live Sandbox):
               </span>
               <div className="flex flex-col gap-1.5">
                 {PRESET_SCENARIOS.map((preset, idx) => (
@@ -351,7 +379,58 @@ export default function AgentCommandPanel({
               />
             </div>
 
-            {/* Live Streaming Progress Card During Gemini + PayPal Calls */}
+            {/* Optional Subcontractor / Collaborator Split */}
+            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+              <label className="flex items-center justify-between text-[11px] font-semibold text-slate-300 cursor-pointer">
+                <span className="flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-emerald-400" />
+                  Add Split Payout Collaborator (Optional)
+                </span>
+                <input
+                  type="checkbox"
+                  checked={enableSplit}
+                  onChange={(e) => setEnableSplit(e.target.checked)}
+                  className="rounded border-slate-700 bg-slate-900 text-[#0070BA]"
+                />
+              </label>
+              {enableSplit && (
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="Collaborator name"
+                    required={enableSplit}
+                    value={collabName}
+                    onChange={(e) => setCollabName(e.target.value)}
+                    className="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] text-white"
+                  />
+                  <input
+                    type="email"
+                    placeholder="Sandbox PayPal email"
+                    required={enableSplit}
+                    value={collabEmail}
+                    onChange={(e) => setCollabEmail(e.target.value)}
+                    className="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] text-white font-mono"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Role (e.g. QA)"
+                    value={collabRole}
+                    onChange={(e) => setCollabRole(e.target.value)}
+                    className="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] text-white"
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    placeholder="Share %"
+                    value={collabSharePct}
+                    onChange={(e) => setCollabSharePct(Number(e.target.value))}
+                    className="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] text-emerald-300 font-mono"
+                  />
+                </div>
+              )}
+            </div>
+
             {isNegotiating && (
               <div className="p-3 rounded-xl bg-blue-950/60 border border-sky-500/40 space-y-1.5 text-xs">
                 <div className="flex items-center gap-2 text-sky-200 font-semibold">
@@ -361,7 +440,7 @@ export default function AgentCommandPanel({
                     <Loader2 className="w-3.5 h-3.5 text-[#FFC439] animate-spin shrink-0" />
                   )}
                   <span>
-                    1. Gemini 3.8 Flash negotiating against ${vendorPriceFloorUsd.toLocaleString()} vendor floor...
+                    1. Negotiating against ${vendorPriceFloorUsd.toLocaleString()} vendor floor...
                   </span>
                 </div>
                 <div className="flex items-center gap-2 text-sky-200 font-semibold">
@@ -373,7 +452,7 @@ export default function AgentCommandPanel({
                     <span className="w-3.5 h-3.5 rounded-full border border-slate-600 shrink-0" />
                   )}
                   <span>
-                    2. Calling @paypal/agent-toolkit create_invoice...
+                    2. {liveMode ? "Calling @paypal/agent-toolkit create_invoice..." : "Simulating PayPal draft invoice..."}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 text-sky-200 font-semibold">
@@ -383,7 +462,7 @@ export default function AgentCommandPanel({
                     <span className="w-3.5 h-3.5 rounded-full border border-slate-600 shrink-0" />
                   )}
                   <span>
-                    3. Placing PayPal Order v2 Hold (intent: AUTHORIZE)...
+                    3. {liveMode ? "Creating PayPal Order v2 (intent: AUTHORIZE)..." : "Simulating PayPal Order v2 Hold..."}
                   </span>
                 </div>
               </div>
@@ -398,12 +477,14 @@ export default function AgentCommandPanel({
             {isNegotiating ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin text-[#003087]" />
-                Negotiating & Placing PayPal Hold...
+                Negotiating &amp; {liveMode ? "Creating PayPal Hold..." : "Simulating Hold..."}
               </>
             ) : (
               <>
                 <Sparkles className="w-4 h-4 text-[#003087]" />
-                Negotiate vs Vendor Floor & Place PayPal Hold
+                {liveMode
+                  ? "Negotiate vs Vendor Floor & Create PayPal Hold"
+                  : "Negotiate vs Vendor Floor & Simulate Hold"}
               </>
             )}
           </button>
@@ -412,14 +493,18 @@ export default function AgentCommandPanel({
 
       {/* Tab 2: Live PayPal Agent Toolkit & Deterministic Gate Stream */}
       {panelTab === "telemetry" && (
-        <div className="p-4 space-y-2.5 overflow-y-auto max-h-[480px]">
+        <div className="p-4 space-y-2.5 overflow-y-auto max-h-[520px]">
           <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
             <span className="flex items-center gap-1.5 font-semibold text-slate-200">
               <Terminal className="w-3.5 h-3.5 text-emerald-400" />
-              Live @paypal/agent-toolkit & Verification Gate Log
+              @paypal/agent-toolkit &amp; Verification Gate Log
             </span>
-            <span className="font-mono text-[10px] text-emerald-400">
-              ● LIVE
+            <span
+              className={`font-mono text-[10px] ${
+                liveMode ? "text-emerald-400" : "text-amber-300"
+              }`}
+            >
+              {liveMode ? "● SANDBOX" : "● PREVIEW"}
             </span>
           </div>
 
@@ -436,6 +521,8 @@ export default function AgentCommandPanel({
                         ? "bg-emerald-400"
                         : ev.status === "WARNING"
                         ? "bg-rose-400"
+                        : ev.status === "SIMULATED"
+                        ? "bg-amber-400"
                         : "bg-sky-400"
                     }`}
                   />
@@ -446,7 +533,14 @@ export default function AgentCommandPanel({
                 </span>
               </div>
 
-              <div className="text-sky-300 font-semibold">{ev.action}</div>
+              <div className="text-sky-300 font-semibold flex items-center gap-1.5">
+                {ev.status === "SIMULATED" && (
+                  <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                    SIMULATED
+                  </span>
+                )}
+                <span>{ev.action}</span>
+              </div>
 
               {ev.endpoint && (
                 <div className="inline-block text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-amber-300 border border-slate-800">

@@ -34,10 +34,11 @@ When a small business (an indie e-commerce shop, clinic, or studio) hires a free
 
 | Design Pillar | Naive "AI Escrow" Demos | **PayPulse AI (Production-Grade Architecture)** |
 | :--- | :--- | :--- |
-| **Payment Mechanism** | Mislabels standard checkout as "escrow" | Uses PayPal's native **`intent: "AUTHORIZE"` Authorization Hold** (`POST /v2/checkout/orders`), capturing funds (`/capture`) only after milestone verification and disbursing subcontractor shares via **PayPal Payouts v1** (`POST /v1/payments/payouts`). |
-| **Agent Negotiation** | Hardcodes a scripted ~15% discount | Runs a **Two-Agent Negotiation** where the freelancer's `Vendor-Floor-Agent` defends a hard walk-away cost floor (`vendorPriceFloorUsd`). Discounts vary naturally (`6.25%`, `8.33%`, `11.11%`, `14.29%`) based on the actual spread between quote, budget, and floor. |
-| **Deliverable Verification** | Trusts an uncalibrated LLM "confidence >= 85%" score | Enforces a **3-Stage Verification Pipeline**:<br/>1. **Deterministic Code Gate** (`SHA-256` digest, byte size, unit test pass counts, bundle size cap `<= 250 KB`, SARIF `0` Critical/High CVEs)<br/>2. **Gemini 3.8 Flash Semantic File Inspection**<br/>3. **Human Buyer Sign-Off Gate** for any contract **`> $500`**. |
-| **PayPal Agent Tooling** | Custom mock wrappers | Integrates PayPal's official **`@paypal/agent-toolkit`** (`create_invoice`, `create_order`, `pay_order`) with full tool-call tracing in the UI. |
+| **Payment Mechanism** | Mislabels standard checkout as "escrow" | Uses PayPal's native **`intent: "AUTHORIZE"` Authorization Hold** (`POST /v2/checkout/orders`), requiring buyer approval + `/authorize`, capturing funds (`/capture`) only after milestone verification, and disbursing shares via **PayPal Payouts v1** (`POST /v1/payments/payouts`). |
+| **Server-Side Trust Boundary** | Trusts deal JSON, amounts, and payout emails sent from the browser | Stores every contract **server-side** in an HTTP-only session store ([`src/lib/deal-store.ts`](./src/lib/deal-store.ts)) with per-deal mutex locks. `/api/agent/audit` accepts only `dealId` and the deliverable file—the server never trusts client-supplied amounts, audit flags, or recipient addresses. |
+| **Agent Negotiation** | Hardcodes a scripted ~15% discount & hardcoded payout splits | Runs a **Two-Agent Negotiation** where the freelancer's `Vendor-Floor-Agent` defends a hard walk-away cost floor (`vendorPriceFloorUsd`) and server-clamped clearing range. Split payout recipients come **strictly from validated user input** (no hardcoded/AI-invented payout emails). |
+| **Deliverable Verification** | Trusts an uncalibrated LLM "confidence >= 85%" score | Enforces a **3-Stage Verification Pipeline**:<br/>1. **Deterministic Code Gate** (`SHA-256` digest, byte size `> 32B`, schema validation, unit & integration tests, bundle cap `<= 250 KB`, Lighthouse score, SARIF `0` Critical/High CVEs)<br/>2. **Gemini 3.8 Flash Semantic File Review**<br/>3. **Human Buyer Sign-Off Gate** for any contract **`> $500`**. |
+| **PayPal Agent Tooling & Mode Honesty** | Custom mock wrappers & silent fake "SUCCESS" states | Integrates PayPal's official **`@paypal/agent-toolkit`** (`create_invoice`, etc.) + Sandbox REST v2/v1 (`PAYPAL_ENVIRONMENT=sandbox` enforced server-side). Demo & unconfigured contracts are labeled **`SIMULATED`** everywhere—no fake success claims. |
 
 ---
 
@@ -58,10 +59,11 @@ sequenceDiagram
     Vendor->>VA: Set Initial Quote ($3,600) & Hard Floor ($3,050)
     BA->>VA: Counter-offer with immediate PayPal Authorization Hold
     VA-->>BA: Defend $3,050 floor -> Agree at $3,200 (-11.11%) with 1 revision round
-    BA->>PPT: create_invoice (#INV-2026-101) & create_order (intent: AUTHORIZE, $3,200)
-    PPT-->>Vendor: Authorization Hold Active (Order ID + Sandbox Approval Link)
+    BA->>PPT: create_invoice (#PP-2026-101) & create_order (intent: AUTHORIZE, $3,200)
+    PPT-->>Vendor: Authorization Hold Pending Approval (Order ID + Approval Link)
+    Buyer->>PPT: Approve Order -> POST /v2/checkout/orders/{id}/authorize
     Vendor->>Gate: Upload Deliverable File (JSON Manifest / SARIF / Code / Screenshot)
-    Gate->>Gate: Compute SHA-256, check byte size, unit tests (48/48), bundle <=250KB, 0 CVEs
+    Gate->>Gate: Compute SHA-256 & run up to 7 deterministic rules (tests, bundle <=250KB, 0 CVEs)
     alt Any Deterministic Check Fails (e.g., 39/48 Tests or 612KB Bundle)
         Gate-->>Buyer: HARD BLOCK CAPTURE (Hold remains uncaptured)
     else All Deterministic Checks Pass
@@ -72,8 +74,8 @@ sequenceDiagram
         else Micro-Milestone <= $500
             Gem->>PPT: Auto-Capture Authorization Hold
         end
-        PPT->>PPT: POST /v2/checkout/orders/{id}/capture
-        PPT->>Vendor: POST /v1/payments/payouts (80% Lead Freelancer / 20% QA Collaborator)
+        PPT->>PPT: POST /v2/payments/authorizations/{auth_id}/capture
+        PPT->>Vendor: POST /v1/payments/payouts (Verified User-Supplied Split Recipients)
     end
 ```
 
@@ -85,12 +87,16 @@ Click any file below to inspect the implementation directly:
 
 | Module / Capability | File Path | What It Implements |
 | :--- | :--- | :--- |
-| **PayPal Agent Toolkit & REST v2 Engine** | [`src/lib/paypal-server.ts`](./src/lib/paypal-server.ts) | Instantiates `PayPalAgentToolkit` (`@paypal/agent-toolkit/openai`) with `ALL_TOOLS_ENABLED`, OAuth2 token exchange (`/v1/oauth2/token`), Orders v2 (`intent: "AUTHORIZE"` & `/capture`), Invoicing v2 (`create_invoice`), and Payouts v1 (`/v1/payments/payouts`). |
-| **Deterministic + Gemini Verification Gate** | [`src/lib/verification-engine.ts`](./src/lib/verification-engine.ts) | **Stage 1**: Node.js `crypto` `SHA-256` hashing, byte-size validation, unit test pass verification, bundle cap check (`<= 250 KB`), and SARIF CVE parser.<br/>**Stage 2**: `@google/genai` (`gemini-3.8-flash`) semantic & multimodal file review.<br/>**Stage 3**: Immutable audit trail builder & `> $500` human sign-off routing. |
-| **Two-Agent Floor-Bounded Negotiation** | [`src/lib/gemini-agents.ts`](./src/lib/gemini-agents.ts) | Uses `@google/genai` (`client.interactions.create` with `gemini-3.8-flash` and structured JSON `response_format`) to negotiate between the client's budget and the freelancer's walk-away price floor. |
-| **AG Grid Community v33 Command Center** | [`src/components/PayPulseAgGrid.tsx`](./src/components/PayPulseAgGrid.tsx) | Custom React cell renderers (Quote vs. Floor, Authorization Hold status badges, Deterministic Rule counters, inline **"Buyer Sign-Off"** & **"Inspect File"** actions), `pinnedBottomRowData` totals, `enableCellChangeFlash`, quick search, and CSV export (`exportDataAsCsv`). |
-| **Two-Sided Hold-Then-Capture Workbench** | [`src/components/PayPalEscrowWorkbench.tsx`](./src/components/PayPalEscrowWorkbench.tsx) | Interactive `@paypal/react-paypal-js` Smart Buttons (`intent: "authorize"`), real file uploader, Stage 1–3 verification breakdown, Human Buyer Sign-Off panel, Split Payout cards, and `@paypal/agent-toolkit` trace viewer. |
-| **Real Deliverable Test Files** | [`public/sample-deliverables/`](./public/sample-deliverables/) | Contains [`shopify-checkout-audit-PASS.json`](./public/sample-deliverables/shopify-checkout-audit-PASS.json) (`48/48` tests, `184 KB` bundle, `0` CVEs) and [`shopify-checkout-audit-DEFECTIVE.json`](./public/sample-deliverables/shopify-checkout-audit-DEFECTIVE.json) (`39/48` tests, `612 KB` bundle, `1` Critical CVE). |
+| **Server-Side Deal Store & Concurrency Locks** | [`src/lib/deal-store.ts`](./src/lib/deal-store.ts) | HTTP-only session-scoped server store and per-deal mutex lock so clients can only pass `dealId` (preventing client-side tampering with amounts, verification state, or payout recipients) and double-capture race conditions. |
+| **Input Validation & Safety Guards** | [`src/lib/validation.ts`](./src/lib/validation.ts) | Strict schema/type validation for `/api/agent/negotiate`, `/api/agent/audit`, and `/api/paypal/authorize`, plus placeholder `.example`/`.test` email blocking before any live PayPal payout call. |
+| **PayPal Agent Toolkit & REST v2 Engine** | [`src/lib/paypal-server.ts`](./src/lib/paypal-server.ts) | Enforces `PAYPAL_ENVIRONMENT=sandbox`, instantiates `PayPalAgentToolkit` (`@paypal/agent-toolkit/openai`), exchanges OAuth2 tokens, runs Orders v2 (`intent: "AUTHORIZE"`, `/authorize`, authorization `/capture`), Invoicing v2 (`create_invoice`), Payouts v1 (`/v1/payments/payouts`), and strict `SIMULATED` separation. |
+| **Deterministic + Gemini Verification Gate** | [`src/lib/verification-engine.ts`](./src/lib/verification-engine.ts) | **Stage 1**: Node.js `crypto` `SHA-256` hashing, byte-size validation, manifest schema validation, unit & integration test pass verification, bundle cap (`<= 250 KB`), Lighthouse benchmark (`>= 90`), and SARIF CVE parser.<br/>**Stage 2**: `@google/genai` (`gemini-3.8-flash`) semantic & multimodal file review (with prompt-injection boundaries).<br/>**Stage 3**: Immutable audit trail builder & `> $500` human sign-off routing. |
+| **Two-Agent Floor-Bounded Negotiation** | [`src/lib/gemini-agents.ts`](./src/lib/gemini-agents.ts) | Uses `@google/genai` (`client.interactions.create` with `gemini-3.8-flash` and structured JSON `response_format`) or deterministic floor-aware bargaining, with server-side price clamping and user-supplied split payout calculation. |
+| **Idempotent Settlement Engine** | [`src/lib/settlement.ts`](./src/lib/settlement.ts) | Executes authorization check → authorization capture → Payouts v1 batch, persisting partial capture state on transient failure so retries never double-capture. |
+| **Demo Seed Generator** | [`src/lib/seed-deals.ts`](./src/lib/seed-deals.ts) | Computes real `SHA-256` hashes and deterministic rule checks dynamically from [`public/sample-deliverables/`](./public/sample-deliverables/), using clearly labeled `.example` emails and `DEMO-*` placeholder IDs. |
+| **AG Grid Community v33 Command Center** | [`src/components/PayPulseAgGrid.tsx`](./src/components/PayPulseAgGrid.tsx) | Custom React cell renderers (Quote vs. Floor, Live Sandbox vs. Simulated Preview badges, Deterministic Rule counters, inline **"Buyer Sign-Off"** actions), `pinnedBottomRowData` totals, `enableCellChangeFlash`, quick search, and CSV export (`exportDataAsCsv`). |
+| **Two-Sided Hold-Then-Capture Workbench** | [`src/components/PayPalEscrowWorkbench.tsx`](./src/components/PayPalEscrowWorkbench.tsx) | Interactive `@paypal/react-paypal-js` Smart Buttons (`intent: "authorize"`), real file uploader, unverified-edits guard, Stage 1–3 verification breakdown, Human Buyer Sign-Off panel, Split Payout cards, and `@paypal/agent-toolkit` trace viewer. |
+| **Real Deliverable Test Files** | [`public/sample-deliverables/`](./public/sample-deliverables/) | Contains [`shopify-checkout-audit-PASS.json`](./public/sample-deliverables/shopify-checkout-audit-PASS.json) (`48/48` unit + `14/14` integration tests, `184 KB` bundle, `96` Lighthouse, `0` CVEs) and [`shopify-checkout-audit-DEFECTIVE.json`](./public/sample-deliverables/shopify-checkout-audit-DEFECTIVE.json) (`39/48` unit + `9/14` integration tests, `612 KB` bundle, `54` Lighthouse, `1` Critical CVE). |
 
 ---
 
@@ -98,24 +104,25 @@ Click any file below to inspect the implementation directly:
 
 Once the app is running (locally or via the hosted URL), you can test all three core scenarios in under 90 seconds:
 
+> **Note on Demo Seed Contracts:** The 4 pre-loaded contracts use fictional company names, reserved `.example` email addresses, and `DEMO-*` placeholder PayPal IDs (they never call PayPal), while computing real `SHA-256` hashes and deterministic rule checks directly from the files in `public/sample-deliverables/`. Creating a new contract executes live PayPal Sandbox APIs once Sandbox keys are configured—or runs in clearly badged **`Simulated Preview`** mode without keys.
+
 ### 1. Test Variable Discount Negotiation Against a Freelancer's Price Floor
 - In the right-hand **New Milestone Contract** panel, click between the 3 preset scenarios:
-  - **Scenario 1 (`$3,800 Quote` vs `$3,250 Floor`)**: Settles around `~11–14%` discount.
-  - **Scenario 2 (`$480 Micro-Milestone` `<= $500` Auto-Capture Threshold)**: Eligible for automatic capture once deterministic checks pass.
-  - **Scenario 3 (`$2,100 Quote` vs `$1,960 Tight Floor`)**: Watch the Vendor Agent defend its `$1,960` labor floor even when the buyer asks for `$1,800`, settling near `~5–6%` discount.
-- Click **"Negotiate vs Vendor Floor & Create PayPal Hold"** to watch the new contract stream into **AG Grid Community v33** with its PayPal Order ID and Invoice number.
+  - **Scenario 1 (`$3,800 Quote` vs `$3,250 Floor`)**: Settles naturally between floor and quote (~`11–14%` savings).
+  - **Scenario 2 (`$2,100 Quote` vs `$1,960 Tight Floor`)**: Buyer asks for `$1,800`, so the Vendor Agent defends its `$1,960` labor floor and settles strictly above it (~`4–6%` savings).
+  - **Scenario 3 (`$480 Micro-Milestone` `<= $500` Auto-Capture Threshold)**: Eligible for automatic capture once deterministic checks pass.
+- Optionally enable **Add Split Payout Collaborator** to split the payout with a second real email, then click **"Negotiate vs Vendor Floor & …"** to stream the contract into **AG Grid Community v33**.
 
 ### 2. Test a Real Broken Deliverable File (Deterministic Hard-Block)
-- Toggle the top header switch to **Freelancer / Agency (Vendor)**.
-- In the workbench under **Deliverable Artifact File**, click **`Load Broken File (39/48 Tests, 612KB, 1 CVE)`** (or upload any `.json`/code file from your computer) and click **`1. Inspect "shopify-checkout-audit-DEFECTIVE.json"`**.
-- Watch **Stage 1 (Deterministic Programmatic Checks)** compute the file's `SHA-256` hash (`e3b0c44298fc…`), catch the 9 failing unit tests, the `612 KB` oversized bundle, and the `1` Critical SARIF vulnerability, and **hard-block PayPal Order capture in code**.
+- Toggle the top header switch to **Freelancer View (Vendor)**.
+- In the workbench under **Freelancer Deliverable File**, click **`Load Broken File (39/48 Tests, 612KB, 1 CVE)`** (or upload/edit any `.json` or code file) and click **`Run Verification Gate on "shopify-checkout-audit-DEFECTIVE.json"`**.
+- Watch **Stage 1 (Deterministic Checks)** compute the file's real `SHA-256` digest (`f270b415…`), fail the unit tests (`39/48`), integration tests (`9/14`), oversized bundle (`612 KB > 250 KB`), low Lighthouse score (`54 < 90`), and SARIF security scan (`1` Critical, `2` High CVEs, `secrets_leaked=true`), and **hard-block capture in code**.
 
 ### 3. Test a Passing Deliverable File + Human Buyer Sign-Off (`> $500`) + Split Payout
-- Click **`Load Passing File (48/48 Tests)`** and click **`1. Inspect "shopify-checkout-audit-PASS.json"`**.
-- All 5 deterministic checks (`48/48` tests, `184 KB <= 250 KB`, `0` CVEs) and the Gemini 3.8 Flash review pass.
-- Because the contract value exceeds the **`$500` auto-capture policy cap**, the contract transitions to **`AWAITING BUYER SIGN-OFF`**.
-- Toggle back to **Small Business Client (Buyer)** and click the gold **`2. Approve & Capture PayPal Hold`** button.
-- PayPulse AI captures the PayPal Order and executes a **Multi-Party Split Payout** (`POST /v1/payments/payouts`), disbursing `80%` to the lead freelancer and `20%` to the QA collaborator, and logs the human sign-off + `SHA-256` hash in Tab 4 (**`@paypal/agent-toolkit` & SHA-256 Trail**).
+- Click **`Load Passing File (48/48 Tests)`** and click **`Run Verification Gate on "shopify-checkout-audit-PASS.json"`**.
+- All **7 deterministic checks** (`SHA-256 & byte size`, `v2.1.0 schema`, `48/48` unit tests, `14/14` integration tests, `184 KB <= 250 KB`, `96 >= 90` Lighthouse, `0` CVEs) and the Stage 2 review pass (`SHA-256` `3bb0d88b…`).
+- Because the contract value exceeds the **`$500` auto-capture threshold**, the contract transitions to **`AWAITING_BUYER_SIGN_OFF`**.
+- Toggle back to **Buyer View (Small Business)** and click **`Approve & Capture … PayPal Hold`** (or **`Simulate Capture …`** in Preview mode) to trigger capture and multi-party payout disbursement (`POST /v1/payments/payouts`).
 
 ---
 
@@ -142,10 +149,13 @@ Fill in your credentials in `.env.local` *(or paste them at runtime via the **AP
 
 | Variable | Required | Description |
 | :--- | :--- | :--- |
+| `PAYPAL_ENVIRONMENT` | Default: `sandbox` | Read and enforced server-side (`sandbox` only permitted in this build). Any other value fails loudly to prevent accidental live API calls without account auth. |
 | `PAYPAL_CLIENT_ID` | Recommended | Your PayPal Sandbox Client ID from the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox). |
 | `PAYPAL_CLIENT_SECRET` | Recommended | Your PayPal Sandbox Client Secret for OAuth2 & `@paypal/agent-toolkit`. |
-| `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | Optional | Enables live `@paypal/react-paypal-js` Smart Payment Buttons (`intent: "authorize"`) in the browser. |
+| `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | Optional | Enables live `@paypal/react-paypal-js` Smart Payment Buttons (`intent: "authorize"`) in the browser for Sandbox orders. |
 | `GEMINI_API_KEY` | Recommended | Your Google Gemini API Key from [Google AI Studio](https://aistudio.google.com/apikey) for `gemini-3.8-flash`. |
+| `APP_BASE_URL` | Optional | Public origin used for PayPal checkout `return_url` / `cancel_url` (defaults to the incoming request origin). |
+| `ALLOW_RUNTIME_CREDENTIALS` | Default: `false` in prod | Set `true` only on a private demo to allow entering API keys in the UI (`sessionStorage` per tab). Disabled by default in production (`NODE_ENV=production`). |
 
 ### 3. Run the Development Server
 ```bash

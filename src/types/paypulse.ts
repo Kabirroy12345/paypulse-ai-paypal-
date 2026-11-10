@@ -73,7 +73,7 @@ export interface SplitRecipient {
   email: string;
   sharePct: number;
   amountUsd: number;
-  status: "PENDING" | "SENT" | "BLOCKED";
+  status: "PENDING" | "SENT" | "SIMULATED" | "BLOCKED";
   payoutItemId?: string;
 }
 
@@ -116,6 +116,11 @@ export interface EscrowDeal {
   paypalPayoutBatchId?: string;
   paypalApprovalUrl?: string;
   paypalMode: "LIVE_SANDBOX" | "UNCONFIGURED_SANDBOX_PREVIEW";
+  /** True for the built-in fictional demo contracts. They never call PayPal, even when live keys are configured. */
+  isDemoSeed: boolean;
+  /** False until a deliverable has been submitted and the verification gate has actually run. */
+  verificationRun: boolean;
+  buyerEmail?: string;
   milestoneTitle: string;
   deliverableSummary: string;
   submittedFileName: string;
@@ -141,7 +146,7 @@ export interface AgentTelemetryEvent {
   action: string;
   endpoint?: string;
   contractCode: string;
-  status: "SUCCESS" | "WARNING" | "INFO";
+  status: "SUCCESS" | "WARNING" | "INFO" | "SIMULATED";
   latencyMs: number;
   details: string;
 }
